@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*$py.class
+.venv/
+venv/
+env/
+
+# Secrets / local config
+config/api_keys.json
+config/certs/*.key
+config/certs/*.crt
+.env
+
+
+# Runtime artifacts
+logs/
+config/self_backups/
+*.bak
+
+# Personal / business working files (not project source)
+desktop/
+
+# Local memory state (keep the .example.json templates only)
+memory/long_term.json
+memory/pending_fixes.json
+memory/affiliate_growth_agent_log.jsonl
+memory/opportunity_pipeline.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
