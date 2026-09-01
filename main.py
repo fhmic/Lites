@@ -120,6 +120,26 @@ from actions.self_update        import self_update
 from actions.affiliate_growth_agent import affiliate_growth_agent
 from actions.web_search        import web_search as web_search_action
 from actions.web_media_fetch   import web_media_fetch
+
+# Executive Directory — maps each delegated tool to the roster member who
+# actually owns it, so the HUD's Active Operative badge can show who is
+# really doing the work instead of a generic "LITE is thinking". Roster
+# ids/photos/bios live in hologram/index.html's AGENT_ROSTER (JS side) —
+# this dict is the Python-side half of that same mapping and must use the
+# same ids. Any tool NOT listed here is LITE's own direct action and stays
+# on "lite". Kept as one dict rather than scattered per-branch so adding a
+# new specialist agent later is a one-line change, not a find-and-replace.
+AGENT_FOR_TOOL = {
+    "code_agent":                "mike",     # Mike   — Code Agent (Programmer & CTO)
+    "self_update":                "mike",     # Mike   — self-maintenance is CTO territory too
+    "rics_agent":                 "ava",      # Ava    — RICS (Research, Intelligence & CRM/Sales)
+    "data_analytics_agent":       "chidinma", # Chidinma — Data Analytics Agent
+    "fta_agent":                  "elias",    # Elias  — CFO (Finance, FP&A & Treasury)
+    "compliance_legal_agent":     "wale",     # Wale   — Compliance & Legal Agent
+    "scheduling_docs_agent":      "adeola",   # Adeola — Scheduling, Document & Presentation Agent
+    "affiliate_growth_agent":     "priya",    # Priya  — Affiliate Growth / GAS
+    "opportunity_pipeline_agent": "nova",     # Nova   — Opportunity Pipeline Director
+}
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.obsidian          import obsidian_notes
@@ -1229,6 +1249,13 @@ class LiteLive:
 
         print(f"[LITE] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
+        # Executive Directory HUD: swap the Active Operative badge to
+        # whichever roster member actually owns this tool (see
+        # AGENT_FOR_TOOL below); anything not in the map is LITE's own
+        # direct action, so it stays on LITE. Reset back to LITE happens
+        # once, at the bottom of this function, so every branch below —
+        # success or failure — hands control back automatically.
+        self.ui.set_active_agent(AGENT_FOR_TOOL.get(name, "lite"))
 
         if name == "save_memory":
             category = args.get("category", "notes")
@@ -1469,6 +1496,8 @@ class LiteLive:
             result = f"Tool '{name}' failed: {e}"
             traceback.print_exc()
             self.speak_error(name, e)
+
+        self.ui.set_active_agent("lite")  # hand-off complete — reporting back to LITE
 
         if not self.ui.muted:
             self.ui.set_state("LISTENING")

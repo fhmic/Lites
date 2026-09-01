@@ -390,6 +390,131 @@
   .remote-manual b{ color:var(--pri-dim); font-weight:normal; letter-spacing:1px; font-size:8px; }
   .remote-manual span{ color:var(--pri); }
 
+  /* ================= active operative badge (bottom-center) =================
+     Shows whichever roster member — LITE herself, or the specialist she has
+     just delegated to — is doing the work right now. Driven entirely by
+     Python's set_active_agent() -> onAgent(id) below; CSS var --agent-acc
+     carries that agent's accent colour into the glow/ring/name so each
+     hand-off reads as a distinct person, not just a text change. */
+  .agent-badge{
+    bottom:30px; left:50%; transform:translateX(-50%);
+    display:flex; align-items:center; gap:12px;
+    padding:8px 18px 8px 8px; border-radius:40px;
+    background:linear-gradient(180deg, var(--panel), rgba(1,13,20,.72));
+    border:1px solid var(--border-b);
+    box-shadow:0 0 22px rgba(0,255,65,.10);
+    cursor:pointer; transition:box-shadow .3s ease, border-color .3s ease;
+    --agent-acc: var(--pri);
+  }
+  .agent-badge:hover{ box-shadow:0 0 28px rgba(0,255,65,.2); }
+  .agent-badge.swap .ab-frame{ animation: agentSwap .55s ease; }
+  .ab-frame{
+    position:relative; width:46px; height:46px; border-radius:50%; flex-shrink:0;
+    border:2px solid var(--agent-acc); box-shadow:0 0 14px var(--agent-acc);
+    overflow:hidden; background:#000;
+  }
+  .ab-frame img{
+    width:100%; height:100%; object-fit:cover; display:block;
+    filter:grayscale(.25) contrast(1.08) saturate(1.1);
+  }
+  .ab-frame::after{ /* scan sweep */
+    content:''; position:absolute; inset:0;
+    background:linear-gradient(180deg, transparent 0%, rgba(255,255,255,.28) 48%, transparent 58%);
+    transform:translateY(-100%); animation: scanSweep 3.2s linear infinite;
+  }
+  .ab-ring{
+    position:absolute; inset:-5px; border-radius:50%;
+    border:1px solid var(--agent-acc); opacity:.55;
+    animation: ringPulse 2.4s ease-in-out infinite;
+  }
+  .ab-info{ line-height:1.3; min-width:118px; }
+  .ab-name{
+    font-size:12px; font-weight:bold; letter-spacing:1.5px; color:var(--agent-acc);
+    text-shadow:0 0 8px var(--agent-acc);
+  }
+  .ab-role{ font-size:8px; letter-spacing:.8px; color:var(--text-dim); margin-top:1px; }
+  .ab-status{ font-size:7.5px; letter-spacing:1.5px; color:var(--agent-acc); margin-top:3px; opacity:.85; }
+  .ab-status::before{ content:'●'; margin-right:4px; animation: pulse 1.6s ease-in-out infinite; }
+  .ab-hint{ font-size:7px; letter-spacing:1px; color:var(--text-dim); margin-left:4px; opacity:.6; align-self:center; }
+
+  @keyframes ringPulse{ 0%,100%{ transform:scale(1); opacity:.55; } 50%{ transform:scale(1.14); opacity:.15; } }
+  @keyframes scanSweep{ 0%{ transform:translateY(-100%); } 100%{ transform:translateY(100%); } }
+  @keyframes agentSwap{
+    0%{ opacity:1; filter:brightness(1) blur(0); }
+    35%{ opacity:.15; filter:brightness(2.4) blur(2px); transform:scale(.86) rotate(-2deg); }
+    60%{ opacity:.5; filter:brightness(1.6) blur(1px); transform:scale(1.05) rotate(1deg); }
+    100%{ opacity:1; filter:brightness(1) blur(0); transform:scale(1) rotate(0); }
+  }
+
+  /* ================= executive directory (org-chart overlay) ================= */
+  .directory-modal{
+    inset:0; display:none; align-items:center; justify-content:center;
+    background:rgba(0,4,6,0.9); z-index:24; padding:36px;
+  }
+  .directory-modal.visible{ display:flex; }
+  .directory-box{ width:min(920px, 94vw); max-height:88vh; display:flex; flex-direction:column; overflow:hidden; }
+  .directory-box .hdr{ font-size:10.5px; padding:13px 16px; letter-spacing:2px; flex-shrink:0; }
+  .directory-body{ padding:18px 20px 22px; overflow-y:auto; }
+
+  .dir-lite{
+    display:flex; align-items:center; gap:16px;
+    border:1px solid var(--border-b); border-radius:5px; padding:14px 18px;
+    margin-bottom:18px; background:rgba(0,255,65,.035);
+    box-shadow:0 0 0 1px rgba(0,255,65,.05) inset;
+    cursor:pointer; transition:box-shadow .25s ease;
+  }
+  .dir-lite.dir-active{ box-shadow:0 0 24px rgba(0,255,65,.28), 0 0 0 1px rgba(0,255,65,.05) inset; }
+  .dir-lite .dir-photo{ width:64px; height:64px; }
+  .dir-lite-info{ flex:1; min-width:0; }
+  .dir-lite-name{ font-size:15px; font-weight:bold; letter-spacing:2px; color:var(--pri); text-shadow:0 0 8px var(--pri); }
+  .dir-lite-role{ font-size:9.5px; letter-spacing:1px; color:var(--text-dim); margin-top:2px; }
+  .dir-lite-tag{ font-size:9.5px; color:var(--text); margin-top:6px; font-style:italic; opacity:.85; }
+  .dir-org-label{
+    font-size:8px; letter-spacing:2px; color:var(--text-dim); text-align:center;
+    margin:2px 0 16px; display:flex; align-items:center; gap:10px;
+  }
+  .dir-org-label::before, .dir-org-label::after{ content:''; flex:1; height:1px; background:var(--border); }
+
+  .dir-grid{ display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }
+  .dir-card{
+    border:1px solid var(--border); border-radius:4px; background:rgba(1,13,20,.5);
+    padding:12px; cursor:pointer; transition:border-color .2s ease, box-shadow .2s ease, transform .2s ease;
+    --acc: var(--pri);
+  }
+  .dir-card:hover{ transform:translateY(-2px); border-color:var(--acc); }
+  .dir-card.dir-active{ border-color:var(--acc); box-shadow:0 0 18px var(--acc); box-shadow:0 0 18px color-mix(in srgb, var(--acc) 40%, transparent); }
+  .dir-card.dir-reserved{ opacity:.6; border-style:dashed; }
+  .dir-card-top{ display:flex; align-items:center; gap:10px; margin-bottom:9px; }
+  .dir-photo{
+    width:44px; height:44px; border-radius:50%; flex-shrink:0; overflow:hidden;
+    border:2px solid var(--acc); box-shadow:0 0 10px var(--acc);
+    box-shadow:0 0 10px color-mix(in srgb, var(--acc) 55%, transparent);
+    background:#000;
+  }
+  .dir-photo img{ width:100%; height:100%; object-fit:cover; display:block; filter:grayscale(.2) contrast(1.06); }
+  .dir-card-name{ font-size:11.5px; font-weight:bold; letter-spacing:1px; color:var(--acc); }
+  .dir-card-role{ font-size:8px; letter-spacing:.5px; color:var(--text-dim); margin-top:2px; line-height:1.3; }
+  .dir-card-tag{ font-size:9px; color:var(--text); font-style:italic; opacity:.85; line-height:1.4; margin-bottom:6px; }
+  .dir-card-badge{
+    display:inline-flex; align-items:center; gap:4px; font-size:7px; letter-spacing:1.5px;
+    color:var(--text-dim); border:1px solid var(--border); border-radius:10px; padding:2px 8px;
+  }
+  .dir-card-badge::before{ content:'●'; font-size:6px; }
+  .dir-card.dir-active .dir-card-badge{ color:var(--acc); border-color:var(--acc); }
+  .dir-card.dir-active .dir-card-badge::before{ animation: pulse 1.6s ease-in-out infinite; }
+  .dir-card-bio{
+    font-size:9px; line-height:1.55; color:var(--text-dim); margin-top:9px;
+    padding-top:9px; border-top:1px dashed var(--border);
+    max-height:0; overflow:hidden; opacity:0; transition:max-height .3s ease, opacity .3s ease;
+  }
+  .dir-card.dir-expanded .dir-card-bio{ max-height:220px; opacity:1; }
+  .dir-card-reports{ font-size:7.5px; letter-spacing:.5px; color:var(--text-dim); margin-top:6px; }
+  .dir-card-reports b{ color:var(--pri-dim); font-weight:normal; }
+
+  @media (max-width: 720px){
+    .dir-grid{ grid-template-columns:repeat(2, 1fr); }
+  }
+
   /* ================= setup modal ================= */
   .setup-modal{
     inset:0; display:none; align-items:center; justify-content:center;
@@ -513,6 +638,16 @@
 
     .setup-box{ width:94vw; max-height:88vh; }
     .toast{ width:82vw; }
+
+    /* Active Operative badge shrinks and tucks above the now-bottom-docked
+       left-stack (preview state / command input) so the two never overlap. */
+    .agent-badge{ bottom:auto; top:64px; padding:6px 12px 6px 6px; gap:8px; }
+    .ab-frame{ width:36px; height:36px; }
+    .ab-info{ min-width:0; }
+    .ab-hint{ display:none; }
+    .directory-box{ width:94vw; max-height:88vh; }
+    .dir-grid{ grid-template-columns:1fr; }
+    .dir-lite{ flex-direction:column; text-align:center; gap:10px; }
   }
 
   /* Slightly larger phones/small tablets — bring PREVIEW STATE back since
@@ -585,6 +720,7 @@
   <div class="icon-row">
     <div class="ctrl-btn" id="muteBtn" title="Mute">🎙</div>
     <div class="ctrl-btn" id="interruptBtn" title="Interrupt">⏹</div>
+    <div class="ctrl-btn" id="directoryBtn" title="Executive Directory">▣</div>
     <div class="ctrl-btn" id="settingsBtn" title="Settings">⚙</div>
   </div>
 
@@ -605,6 +741,35 @@
       <span class="cursor"></span>
     </div>
     <div class="fileup" id="fileUpload"><span class="ic">⇪</span> <span id="fileUploadLabel">DRAG FILE OR CLICK TO UPLOAD</span></div>
+  </div>
+</div>
+
+<!-- Active Operative badge — always visible; shows whichever roster
+     member (LITE, or the specialist she has delegated to) is currently
+     doing the work. Click opens the full Executive Directory. Driven by
+     LiteUI.set_active_agent() -> onAgent() (see AGENT_ROSTER in the
+     module script below). -->
+<div class="hud agent-badge" id="agentBadge" title="Open Executive Directory">
+  <div class="ab-frame"><img id="agentBadgeImg" src="agents/lite.jpg" alt=""><div class="ab-ring"></div></div>
+  <div class="ab-info">
+    <div class="ab-name" id="agentBadgeName">LITE</div>
+    <div class="ab-role" id="agentBadgeRole">Chief Operating Officer</div>
+    <div class="ab-status" id="agentBadgeStatus">ORCHESTRATING</div>
+  </div>
+  <div class="ab-hint">DIRECTORY ▸</div>
+</div>
+
+<!-- Executive Directory — full company roster, org-chart style. LITE's
+     card sits alone at the top (she reports to Felix); every specialist
+     below reports to her. Cards are built from AGENT_ROSTER in JS so this
+     stays in sync with the Active Operative badge automatically. -->
+<div class="hud directory-modal" id="directoryModal">
+  <div class="directory-box panel">
+    <div class="hdr">
+      <span>◈ EXECUTIVE DIRECTORY — L.I.T.E.</span>
+      <span class="cp-close" id="directoryClose">✕</span>
+    </div>
+    <div class="directory-body" id="directoryBody"></div>
   </div>
 </div>
 
@@ -784,6 +949,85 @@ const PALETTE = {
 let state = 'listening';
 let stateColor = new THREE.Color(PALETTE.listening);
 let targetColor = new THREE.Color(PALETTE.listening);
+
+// ---------- Executive Directory roster ----------
+// One entry per person on LITE's org chart. `id` must match the ids
+// Python's main.py (AGENT_FOR_TOOL) sends through set_active_agent() —
+// keep the two in sync when a new specialist is added. `img` is served
+// straight off this same local HTTP root, from hologram/agents/.
+const AGENT_ROSTER = {
+  lite: {
+    name: 'LITE', role: 'Chief Operating Officer — Executive Orchestrator',
+    img: 'agents/lite.jpg', acc: '#00ff41', reportsTo: 'Felix (Principal)',
+    tag: 'Runs the room. Delegates to the desk below, owns every hand-off.',
+    bio: 'Holds the whole operation together — reads intent, routes work to the right specialist, and is the only one who reports straight to Felix. Every capability below exists because LITE decided the task needed a specialist, not a generalist guess.',
+    status: 'ORCHESTRATING',
+  },
+  mike: {
+    name: 'Mike', role: 'Code Agent — Programmer & CTO',
+    img: 'agents/mike.jpg', acc: '#4d8bff', reportsTo: 'LITE (COO)',
+    tag: 'Ships real diffs, never a hopeful guess.',
+    bio: 'Delegates coding work to a full agentic Claude Code session that reads files, runs commands and iterates — then independently compiles every touched file and rolls back to a clean checkpoint on any failure. Also owns LITE\u2019s own self-update pipeline.',
+    status: 'STANDBY',
+  },
+  ava: {
+    name: 'Ava', role: 'RICS Agent — Research, Intelligence & CRM/Sales',
+    img: 'agents/ava.png', acc: '#38e1ff', reportsTo: 'LITE (COO)',
+    tag: 'Research isn\u2019t a report — it\u2019s the first step of the pipeline.',
+    bio: 'Owns the full research \u2192 log \u2192 pipeline motion: prospect and market research, CRM reads/writes, and the growth-ops flow. Research and sales sit under one desk because they\u2019re the same motion.',
+    status: 'STANDBY',
+  },
+  chidinma: {
+    name: 'Chidinma', role: 'Data Analytics Agent — Data Analyst',
+    img: 'agents/chidinma.jpg', acc: '#b073ff', reportsTo: 'LITE (COO)',
+    tag: 'Fixed routes only — no open SQL ever touches production.',
+    bio: 'Answers business questions from the earnings/run and CRM tables through hardcoded, parameterized routes, plus ad-hoc CSV/Excel analysis for anything handed to her directly. Every query shape is fixed by design.',
+    status: 'STANDBY',
+  },
+  elias: {
+    name: 'Elias', role: 'CFO — FTA Agent (Finance, FP&A & Treasury)',
+    img: 'agents/elias.png', acc: '#ffcc00', reportsTo: 'LITE (COO)',
+    tag: 'The LLM interprets. The arithmetic is always real code.',
+    bio: 'Statement interpretation, financial ratios, and investment appraisal (NPV/IRR/MIRR/PBP/ARR/PI) — Nigerian-primary by default, never Nigeria-only. The ratios and appraisal math run in real code, never inside a model call.',
+    status: 'STANDBY',
+  },
+  wale: {
+    name: 'Wale', role: 'Compliance & Legal Agent',
+    img: 'agents/wale.jpg', acc: '#ff8a3d', reportsTo: 'LITE (COO)',
+    tag: 'Analysis and options — never a single \u201cyou must\u201d directive.',
+    bio: 'Contract review, compliance checks and regulatory research against current Nigerian law (NDPR, CAC, sector licensing), with jurisdiction as a parameter everywhere. Always live-searches anything regulation-dependent.',
+    status: 'STANDBY',
+  },
+  adeola: {
+    name: 'Adeola', role: 'Scheduling, Document & Presentation Agent (SDA)',
+    img: 'agents/adeola.jpg', acc: '#58ffa0', reportsTo: 'LITE (COO)',
+    tag: 'The outline is the LLM\u2019s job. Rendering the file never is.',
+    bio: 'Reminders, plus real .docx/.pptx generation — an LLM drafts the outline, deterministic code renders it into an actual file, saved straight to a dedicated LITE Generated folder.',
+    status: 'STANDBY',
+  },
+  priya: {
+    name: 'Priya', role: 'Affiliate Growth Agent — GAS',
+    img: 'agents/priya.png', acc: '#ff4fa3', reportsTo: 'LITE (COO)',
+    tag: 'Every report ends in an executive summary you can act on.',
+    bio: 'Offer ranking, audience research, growth strategy and content calendars for affiliate/social growth — every response closes with a parsed Opportunity / Action / ROI / Risk / Priority summary.',
+    status: 'STANDBY',
+  },
+  aisha: {
+    name: 'Aisha', role: 'Reserved — Bench',
+    img: 'agents/aisha.jpg', acc: '#7d9187', reportsTo: 'LITE (COO)',
+    tag: 'Next hire, already badged.',
+    bio: 'Held in reserve for the next specialist agent Felix stands up — pre-issued so a new desk can go live with a face and a badge on day one, no asset work required.',
+    status: 'RESERVED', reserved: true,
+  },
+  nova: {
+    name: 'Nova', role: 'Opportunity Pipeline Director',
+    img: 'agents/nova.jpg', acc: '#ff5b7a', reportsTo: 'LITE (COO)',
+    tag: 'One fully-vetted opportunity beats twenty unvetted ones.',
+    bio: 'Runs Research \u2192 Viability \u2192 Wale\u2019s legal gate \u2192 Elias\u2019s real NPV/IRR gate on every candidate, dropping anything that doesn\u2019t clear the bar — one solid, vetted opportunity every day or two instead of a pile no one can act on.',
+    status: 'STANDBY',
+  },
+};
+let activeAgentId = 'lite';
 
 // ---------- renderer / scene / camera ----------
 const container = document.getElementById('scene');
@@ -1733,6 +1977,98 @@ const statusEl = document.getElementById('statusText');
 const rootStyle = document.documentElement.style;
 const muteBtn = document.getElementById('muteBtn');
 
+// ---------- Executive Directory: badge + org-chart panel ----------
+const agentBadge       = document.getElementById('agentBadge');
+const agentBadgeImg    = document.getElementById('agentBadgeImg');
+const agentBadgeName   = document.getElementById('agentBadgeName');
+const agentBadgeRole   = document.getElementById('agentBadgeRole');
+const agentBadgeStatus = document.getElementById('agentBadgeStatus');
+const directoryModal   = document.getElementById('directoryModal');
+const directoryBody    = document.getElementById('directoryBody');
+
+function setActiveAgent(id){
+  const a = AGENT_ROSTER[id] || AGENT_ROSTER.lite;
+  const changed = (id !== activeAgentId);
+  activeAgentId = AGENT_ROSTER[id] ? id : 'lite';
+
+  agentBadge.style.setProperty('--agent-acc', a.acc);
+  agentBadgeImg.src = a.img;
+  agentBadgeImg.alt = a.name;
+  agentBadgeName.textContent = a.name.toUpperCase();
+  agentBadgeRole.textContent = a.role;
+  agentBadgeStatus.textContent = activeAgentId === 'lite' ? a.status : 'ACTIVE';
+
+  if(changed){
+    agentBadge.classList.remove('swap'); void agentBadge.offsetWidth; agentBadge.classList.add('swap');
+    if(activeAgentId !== 'lite') pushLog(`HANDOFF: LITE \u2192 ${a.name.toUpperCase()} (${a.role.split('\u2014')[0].trim()})`);
+    else pushLog('HANDOFF: reporting back to LITE.');
+  }
+  // keep the directory panel's highlight in sync if it's open
+  document.querySelectorAll('.dir-card, .dir-lite').forEach(el=>{
+    el.classList.toggle('dir-active', el.dataset.agent === activeAgentId);
+  });
+}
+
+function renderDirectory(){
+  const lite = AGENT_ROSTER.lite;
+  const specialists = Object.keys(AGENT_ROSTER).filter(k => k !== 'lite');
+
+  let html = `
+    <div class="dir-lite" data-agent="lite">
+      <div class="dir-photo"><img src="${lite.img}" alt=""></div>
+      <div class="dir-lite-info">
+        <div class="dir-lite-name">${lite.name} \u2014 COO</div>
+        <div class="dir-lite-role">${lite.role} &nbsp;\u00b7&nbsp; reports to <b style="color:var(--pri-dim)">${lite.reportsTo}</b></div>
+        <div class="dir-lite-tag">\u201c${lite.tag}\u201d</div>
+        <div class="dir-card-bio dir-lite-bio">${lite.bio}</div>
+      </div>
+    </div>
+    <div class="dir-org-label">SPECIALIST DESK \u2014 REPORTS TO LITE</div>
+    <div class="dir-grid">
+  `;
+  specialists.forEach(id=>{
+    const a = AGENT_ROSTER[id];
+    html += `
+      <div class="dir-card${a.reserved ? ' dir-reserved' : ''}" data-agent="${id}" style="--acc:${a.acc}">
+        <div class="dir-card-top">
+          <div class="dir-photo"><img src="${a.img}" alt=""></div>
+          <div>
+            <div class="dir-card-name">${a.name}</div>
+            <div class="dir-card-role">${a.role}</div>
+          </div>
+        </div>
+        <div class="dir-card-tag">\u201c${a.tag}\u201d</div>
+        <span class="dir-card-badge">${a.reserved ? 'RESERVED' : 'STANDBY'}</span>
+        <div class="dir-card-bio">
+          ${a.bio}
+          <div class="dir-card-reports">REPORTS TO <b>${a.reportsTo}</b></div>
+        </div>
+      </div>
+    `;
+  });
+  html += `</div>`;
+  directoryBody.innerHTML = html;
+
+  directoryBody.querySelectorAll('.dir-card').forEach(card=>{
+    card.addEventListener('click', ()=> card.classList.toggle('dir-expanded'));
+  });
+  directoryBody.querySelector('.dir-lite')?.addEventListener('click', function(){
+    this.classList.toggle('dir-expanded');
+    this.querySelector('.dir-lite-bio').style.maxHeight = this.classList.contains('dir-expanded') ? '160px' : '0';
+    this.querySelector('.dir-lite-bio').style.opacity = this.classList.contains('dir-expanded') ? '1' : '0';
+  });
+  // re-apply current highlight now that the DOM was just rebuilt
+  document.querySelectorAll('.dir-card, .dir-lite').forEach(el=>{
+    el.classList.toggle('dir-active', el.dataset.agent === activeAgentId);
+  });
+}
+renderDirectory();
+setActiveAgent('lite');
+
+agentBadge.addEventListener('click', ()=> directoryModal.classList.add('visible'));
+document.getElementById('directoryClose').addEventListener('click', ()=> directoryModal.classList.remove('visible'));
+document.getElementById('directoryBtn').addEventListener('click', ()=> directoryModal.classList.toggle('visible'));
+
 // ---------- audio cues — procedurally synthesized, no bundled sound files ----------
 // (consistent with vendoring Three.js locally instead of a CDN: nothing here
 // depends on an external asset that could go missing or need licensing)
@@ -1849,6 +2185,7 @@ function initBridge(){
       onWeather:  (dataJson) => { try{ renderWeather(JSON.parse(dataJson)); }catch(e){} },
       onWeatherHide: ()    => {},
       onToast:    (kicker, text) => showToast(kicker, text),
+      onAgent:    (id)      => setActiveAgent(id),
       onContent:  (title, text, kind, payload) => {
         if (window.__cpPushContent) window.__cpPushContent(title, text, kind, payload);
         else { // extremely defensive fallback if the IIFE above somehow didn't run

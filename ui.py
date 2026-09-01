@@ -242,6 +242,7 @@ class HudWindow(QMainWindow):
     _mute_toggle_sig  = pyqtSignal()
     _mute_set_sig     = pyqtSignal(bool)
     _toast_sig        = pyqtSignal(str, str)
+    _agent_sig        = pyqtSignal(str)   # active-agent id, for the Executive Directory HUD (see set_active_agent)
     _run_js_sig       = pyqtSignal(str)   # raw JS push — the ONE safe entry point, see _run_js() below
 
     def __init__(self, face_path: str = ""):
@@ -297,6 +298,7 @@ class HudWindow(QMainWindow):
         self._mute_toggle_sig.connect(self._toggle_mute)
         self._mute_set_sig.connect(self._set_muted)
         self._toast_sig.connect(self._js_toast)
+        self._agent_sig.connect(self._js_agent)
         self._run_js_sig.connect(self._run_js_on_gui_thread)
 
         # ---- wire bridge (JS -> Python) ----
@@ -384,6 +386,13 @@ class HudWindow(QMainWindow):
         self._run_js(
             f"window.LiteHud && window.LiteHud.onToast({json.dumps(kicker)}, {json.dumps(text)})"
         )
+
+    def _js_agent(self, agent_id: str):
+        """Pushes the id of whichever roster member (LITE or a specialist
+        sub-agent) is currently doing the work, so the HUD's Active
+        Operative badge and Executive Directory panel can reflect it live.
+        Unknown ids just fall back to 'lite' on the JS side."""
+        self._run_js(f"window.LiteHud && window.LiteHud.onAgent({json.dumps(agent_id)})")
 
     # ---------- weather (background fetch, same data source as before) ----------
     def _on_weather_show(self, city: str):
@@ -779,6 +788,14 @@ class LiteUI:
 
     def notify_phone_connected(self) -> None:
         self._win._toast_sig.emit("REMOTE", "Phone connected.")
+
+    # ---------- executive directory (agent personas) ----------
+    def set_active_agent(self, agent_id: str) -> None:
+        """Thread-safe: tells the HUD which roster member (LITE herself, or
+        the specialist sub-agent currently doing the work) is active right
+        now, so the Active Operative badge and Executive Directory panel
+        can update live. Pass 'lite' to hand control back to LITE."""
+        self._win._agent_sig.emit((agent_id or "lite").strip().lower())
 
     # ---------- core HUD ----------
     def set_state(self, state: str):
