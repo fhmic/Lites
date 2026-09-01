@@ -411,6 +411,11 @@ def _run_in_background(focus: str, player=None):
     _run_in_progress.set()
 
     def _worker():
+        if player is not None and hasattr(player, "set_active_agent"):
+            try:
+                player.set_active_agent("nova")
+            except Exception:
+                pass
         try:
             result = run_pipeline(focus)
             if player is not None and hasattr(player, "show_content"):
@@ -441,6 +446,11 @@ def _run_in_background(focus: str, player=None):
             print(f"[{AGENT_NAME}] Background run failed: {e}")
         finally:
             _run_in_progress.clear()
+            if player is not None and hasattr(player, "set_active_agent"):
+                try:
+                    player.set_active_agent("lite")  # hand-off complete, same as the interactive path
+                except Exception:
+                    pass
 
     threading.Thread(target=_worker, daemon=True).start()
 

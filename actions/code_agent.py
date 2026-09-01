@@ -120,9 +120,19 @@ def _extra_env(cfg: dict) -> dict:
 
 # ── Git helpers ──────────────────────────────────────────────────────────────
 
+# Every commit code_agent makes is attributed to a fixed local identity,
+# scoped to just these invocations via -c (never touches the user's global
+# git config) — found in testing that a repo/machine with no git user.name/
+# user.email configured makes every commit here fail with "please tell me
+# who you are", and worse, the final commit was doing that failure
+# *silently* and still reporting "committed". This closes that off at the
+# source rather than just detecting it after the fact.
+_GIT_IDENTITY = ["-c", "user.name=LITE Code Agent", "-c", "user.email=code-agent@lite.local"]
+
+
 def _git(args: list, cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=check,
+        ["git", *_GIT_IDENTITY, *args], cwd=str(cwd), capture_output=True, text=True, check=check,
     )
 
 
@@ -130,16 +140,31 @@ def _is_git_repo(path: Path) -> bool:
     return (path / ".git").exists()
 
 
-def _ensure_checkpoint(work_dir: Path, log) -> str:
+def _ensure_checkpoint(work_dir: Path, log):
     """Commits any pre-existing dirty state (so it's never lost or conflated
-    with the agent's own changes) and returns the resulting HEAD hash."""
-    status = _git(["status", "--porcelain"], work_dir).stdout
+    with the agent's own changes) and returns the resulting HEAD hash — or
+    None (with a reason logged) if the checkpoint itself couldn't be made,
+    in which case the caller must NOT proceed: no checkpoint means no safety
+    net to roll back to."""
+    status = _git(["status", "--porcelain"], work_dir, check=False).stdout
     if status.strip():
         log("Working tree has pending changes — snapshotting them first...")
-        _git(["add", "-A"], work_dir)
-        _git(["commit", "-m", "chore(code_agent): snapshot before agent run"], work_dir)
-    head = _git(["rev-parse", "HEAD"], work_dir).stdout.strip()
-    return head
+        _git(["add", "-A"], work_dir, check=False)
+        commit = _git(["commit", "-m", "chore(code_agent): snapshot before agent run"], work_dir, check=False)
+        still_dirty = _git(["status", "--porcelain"], work_dir, check=False).stdout
+        if still_dirty.strip():
+            reason = (commit.stderr or commit.stdout or "unknown reason").strip().splitlines()[-1:] or ["unknown reason"]
+            log(f"Checkpoint commit failed: {reason[0]}")
+            return None
+    head = _git(["rev-parse", "HEAD"], work_dir, check=False).stdout.strip()
+    return head or None
+
+
+def _changed_py_files(work_dir: Path, since: str) -> list:
+    diff = _git(["diff", "--name-only", since, "--", "*.py"], work_dir, check=False).stdout
+    untracked = _git(["ls-files", "--others", "--exclude-standard", "*.py"], work_dir, check=False).stdout
+    files = set(f for f in diff.splitlines() if f.strip()) | set(f for f in untracked.splitlines() if f.strip())
+    return sorted(files)
 
 
 def _changed_py_files(work_dir: Path, since: str) -> list:
@@ -234,6 +259,13 @@ def code_agent(
 
     # ── Checkpoint ───────────────────────────────────────────────────────────
     checkpoint = _ensure_checkpoint(work_dir, log)
+    if not checkpoint:
+        return report(
+            "Couldn't create the safety checkpoint git commit needs before I hand "
+            "anything to Claude Code — nothing was touched. Check `git status` and "
+            "`git log` in that folder for what's blocking a commit there (a hook, a "
+            "lock file, etc.) and try again."
+        )
     log(f"Checkpoint set at {checkpoint[:10]}. Delegating to Claude Code...")
 
     prompt = (
@@ -297,13 +329,24 @@ def code_agent(
         )
 
     # ── Commit the verified-good change ─────────────────────────────────────
-    _git(["add", "-A"], work_dir)
+    _git(["add", "-A"], work_dir, check=False)
     summary = task[:72] + ("..." if len(task) > 72 else "")
-    _git(["commit", "-m", f"feat(code_agent): {summary}"], work_dir, check=False)
+    commit = _git(["commit", "-m", f"feat(code_agent): {summary}"], work_dir, check=False)
+    still_dirty = _git(["status", "--porcelain"], work_dir, check=False).stdout
 
     note = " (session hit the time limit — verify the result before relying on it)" if timed_out else ""
     files_txt = "\n".join(f"  • {f}" for f in changed) if changed else "  (no .py files — see git status)"
     restart_note = " Restart LITE for changes to its own code to take effect." if scope != "external" else ""
+
+    if still_dirty.strip():
+        reason = (commit.stderr or commit.stdout or "unknown reason").strip().splitlines()[-1:] or ["unknown reason"]
+        return report(
+            f"Done{note} in {elapsed:.0f}s. Changed:\n{files_txt}\n"
+            f"Verified compiling — but the commit itself failed ({reason[0]}). "
+            f"The change is on disk and staged, not committed — commit it "
+            f"manually once that's sorted.{restart_note}"
+        )
+
     return report(
         f"Done{note} in {elapsed:.0f}s. Changed:\n{files_txt}\n"
         f"Verified compiling and committed.{restart_note}"
