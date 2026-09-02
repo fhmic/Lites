@@ -33,6 +33,12 @@ pywinauto; sys_platform == "win32"
 pywin32; sys_platform == "win32"
 qrcode[pil]
 
+# Gmail (read + draft only, never send) and Google Calendar — see
+# core/google_workspace.py's docstring for the one-time Google Cloud setup
+google-auth
+google-auth-oauthlib
+google-api-python-client
+
 # Optional — only needed for fallback voice mode (used automatically when
 # Gemini Live is unavailable and a Claude/custom text provider is
 # configured). Skip these if you don't want that feature; the rest of the

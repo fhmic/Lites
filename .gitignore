@@ -27,6 +27,12 @@ memory/long_term.json
 memory/pending_fixes.json
 memory/affiliate_growth_agent_log.jsonl
 memory/opportunity_pipeline.json
+memory/pending_calendar_events.json
+memory/gmail_scan_state.json
+
+# Google OAuth — never commit either of these, the token is a live credential
+config/google_client_secret.json
+config/google_token.json
 
 # OS / editor
 .DS_Store

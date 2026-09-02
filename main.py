@@ -806,26 +806,49 @@ TOOL_DECLARATIONS = [
     {
         "name": "scheduling_docs_agent",
         "description": (
-            "Delegates a scheduling, document-creation, or presentation-creation task to "
-            "the Scheduling & Docs Agent — a specialist sub-agent (reporting to LITE). "
-            "THREE capabilities: (1) schedule_reminder — sets a one-off OS-level reminder "
-            "(delegates to LITE's existing reminder system); (2) create_document — "
-            "generates a Word (.docx) document from a plain-language description (an LLM "
-            "writes the outline, real code renders the file) or a structured outline you "
-            "provide directly; (3) create_presentation — generates a PowerPoint (.pptx) "
-            "the same way. Generated files are saved to ~/Documents/LITE Generated/ and "
-            "the response includes the full saved path. Call for 'set a reminder for X', "
-            "'write me a document about X', 'make a presentation on X', or similar."
+            "Delegates a scheduling, document-creation, presentation-creation, Gmail, or "
+            "Calendar task to the Scheduling & Docs Agent — a specialist sub-agent "
+            "(reporting to LITE). Capabilities: (1) schedule_reminder — a one-off OS-level "
+            "reminder; (2) create_document / (3) create_presentation — generates a .docx/"
+            ".pptx from a description or outline; (4) check_inbox — lists recent unread "
+            "Gmail with sender/subject/snippet; (5) draft_reply — drafts a reply to a "
+            "specific email (by email_id from check_inbox, or a from/subject hint) per "
+            "Felix's instructions, saved to Gmail Drafts for his own review and send — "
+            "this NEVER sends an email itself, only drafts; (6) schedule_event — creates a "
+            "calendar event; if it has attendees, this does NOT create it immediately (an "
+            "invite email fires the instant it's created) — it instead describes exactly "
+            "what would be created and returns a pending event_id, and you must relay that "
+            "to Felix and wait for him to explicitly say to confirm or cancel before "
+            "calling (7)/(8); (7) confirm_event(event_id) — actually creates a pending "
+            "event and sends the invites, only after Felix explicitly confirms; "
+            "(8) cancel_event(event_id) — discards a pending event, no invites sent; "
+            "(9) list_events — upcoming calendar items, for context or conflict-checking. "
+            "A background pass also periodically scans unread Gmail on its own and drafts "
+            "replies for anything that looks like it genuinely needs one (skipping "
+            "newsletters/notifications), surfacing them here without being asked — "
+            "check_inbox/draft_reply are for when Felix explicitly asks about email."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":       {"type": "STRING", "description": "schedule_reminder | create_document | create_presentation (inferred from context if omitted)"},
+                "action":       {"type": "STRING", "description": "schedule_reminder | create_document | create_presentation | check_inbox | draft_reply | schedule_event | confirm_event | cancel_event | list_events (inferred from context only for the first three; required for the rest)"},
                 "date":         {"type": "STRING", "description": "For schedule_reminder: YYYY-MM-DD."},
                 "time":         {"type": "STRING", "description": "For schedule_reminder: HH:MM (24-hour)."},
                 "message":      {"type": "STRING", "description": "For schedule_reminder: what the reminder should say."},
-                "description":  {"type": "STRING", "description": "For create_document/create_presentation: what it should be about, in the user's words — an LLM turns this into a full outline."},
-                "outline":      {"type": "OBJECT", "description": "For create_document/create_presentation: a pre-structured outline to render directly, skipping LLM generation, if the user (or another agent) already has exact content in mind."},
+                "description":  {"type": "STRING", "description": "For create_document/create_presentation: what it should be about. For draft_reply: alias for instructions."},
+                "outline":      {"type": "OBJECT", "description": "For create_document/create_presentation: a pre-structured outline to render directly, skipping LLM generation."},
+                "max_results":  {"type": "INTEGER", "description": "For check_inbox/list_events: how many to return (default 10)."},
+                "unread_only":  {"type": "BOOLEAN", "description": "For check_inbox: default true."},
+                "email_id":     {"type": "STRING", "description": "For draft_reply: the Gmail message id, from a prior check_inbox result."},
+                "from":         {"type": "STRING", "description": "For draft_reply, if email_id isn't known: match against the sender."},
+                "subject":      {"type": "STRING", "description": "For draft_reply, if email_id isn't known: match against the subject."},
+                "instructions": {"type": "STRING", "description": "For draft_reply: what the reply should say, in Felix's words."},
+                "title":        {"type": "STRING", "description": "For schedule_event: the event title."},
+                "start":        {"type": "STRING", "description": "For schedule_event: ISO datetime, e.g. 2026-09-05T14:00:00."},
+                "end":          {"type": "STRING", "description": "For schedule_event: ISO datetime."},
+                "attendees":    {"type": "ARRAY", "items": {"type": "STRING"}, "description": "For schedule_event: attendee email addresses, if any — triggers the confirm-before-inviting gate."},
+                "location":     {"type": "STRING", "description": "For schedule_event: optional location."},
+                "event_id":     {"type": "STRING", "description": "For confirm_event/cancel_event: the pending id returned by schedule_event."},
             },
             "required": []
         }
@@ -2529,6 +2552,15 @@ def main():
     # installed; the in-app mute button and F4 still work regardless.
     from core.global_hotkey import start_global_mute_hotkey
     start_global_mute_hotkey(ui)
+
+    # The one genuinely proactive background loop in the app — checks Gmail
+    # on its own at 10am and 4pm every day and drafts replies for anything
+    # that needs one, independent of user activity (see
+    # agents/scheduling_docs_agent.py). Silently does nothing per cycle
+    # until config/google_client_secret.json exists (the one-time Google
+    # Cloud setup that can't be automated).
+    from agents.scheduling_docs_agent import start_gmail_scan_scheduler
+    start_gmail_scan_scheduler(ui)
 
     def runner():
         ui.wait_for_api_key()

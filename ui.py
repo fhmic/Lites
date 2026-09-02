@@ -789,6 +789,13 @@ class LiteUI:
     def notify_phone_connected(self) -> None:
         self._win._toast_sig.emit("REMOTE", "Phone connected.")
 
+    def notify(self, kicker: str, text: str) -> None:
+        """Thread-safe: fires a real floating toast popup (center-screen,
+        auto-dismisses, draggable) — for anything that happened on its own
+        and deserves actual attention, as opposed to show_content's movable
+        panel which only updates silently if you're not already looking at it."""
+        self._win._toast_sig.emit(kicker, text)
+
     # ---------- executive directory (agent personas) ----------
     def set_active_agent(self, agent_id: str) -> None:
         """Thread-safe: tells the HUD which roster member (LITE herself, or
