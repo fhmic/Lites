@@ -2186,6 +2186,10 @@ function initBridge(){
       onWeatherHide: ()    => {},
       onToast:    (kicker, text) => showToast(kicker, text),
       onAgent:    (id)      => setActiveAgent(id),
+      onDirectoryVisibility: (visible) => {
+        if (visible) directoryModal.classList.add('visible');
+        else directoryModal.classList.remove('visible');
+      },
       onContent:  (title, text, kind, payload) => {
         if (window.__cpPushContent) window.__cpPushContent(title, text, kind, payload);
         else { // extremely defensive fallback if the IIFE above somehow didn't run

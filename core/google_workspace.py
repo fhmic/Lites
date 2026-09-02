@@ -88,7 +88,12 @@ def _get_credentials():
             creds.refresh(Request())
         else:
             flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), SCOPES)
-            creds = flow.run_local_server(port=0)  # opens a browser, one time
+            # Use a fixed localhost callback that matches the registered desktop-app
+            # redirect URI in Google Cloud Console. A dynamic port works for some
+            # clients, but the Google client JSON in this repo currently only allows
+            # http://localhost, so pinning the port keeps the consent loop stable and
+            # avoids redirect_uri mismatch errors.
+            creds = flow.run_local_server(port=8080, host="localhost")
         TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
         TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
 

@@ -140,6 +140,23 @@ AGENT_FOR_TOOL = {
     "affiliate_growth_agent":     "priya",    # Priya  — Affiliate Growth / GAS
     "opportunity_pipeline_agent": "nova",     # Nova   — Opportunity Pipeline Director
 }
+
+EXECUTIVE_DIRECTORY_CONTEXT = (
+    "[EXECUTIVE DIRECTORY]\n"
+    "LITE is the Executive Orchestrator and Chief Operating Officer. "
+    "Every specialist below reports to LITE and owns a distinct area of the business. "
+    "When the user asks who is handling or assigned to a task, answer with the correct personality and role.\n\n"
+    "- LITE: Executive Orchestrator / COO — runs the whole operation, delegates work, and owns the final handoff back to the user.\n"
+    "- Mike: Code Agent / Programmer & CTO — responsible for coding work, project fixes, automation, and LITE's self-update pipeline.\n"
+    "- Ava: RICS Agent / Research, Intelligence & CRM/Sales — handles research, CRM, pipeline work, and outbound sales intelligence.\n"
+    "- Chidinma: Data Analytics Agent — data analysis, metrics, and business KPI interpretation.\n"
+    "- Elias: FTA Agent / CFO — financial analysis, FP&A, treasury logic, ratios, and investment appraisal.\n"
+    "- Wale: Compliance & Legal Agent — contracts, compliance, regulatory review, and legal analysis.\n"
+    "- Adeola: Scheduling, Document & Presentation Agent — scheduling, doc generation, presentations, and work product creation.\n"
+    "- Priya: Affiliate Growth Agent / GAS — affiliate marketing strategy, content, audience research, and growth operations.\n"
+    "- Nova: Opportunity Pipeline Director — opportunity validation, pipeline prioritization, and deal flow management.\n\n"
+    "Use this roster precisely when referring to the executive directory, the active operative, or who is handling a delegated task.\n\n"
+)
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.obsidian          import obsidian_notes
@@ -333,6 +350,24 @@ TOOL_DECLARATIONS = [
             },
             "required": []
         }
+    },
+    {
+        "name": "show_executive_directory",
+        "description": (
+            "Opens LITE's Executive Directory overlay so the user can see the full "
+            "roster of specialist agents and the current active operative. Use this "
+            "when the user asks to show, open, reveal, or view the executive directory, "
+            "org chart, or roster cards on screen."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}, "required": []}
+    },
+    {
+        "name": "hide_executive_directory",
+        "description": (
+            "Closes LITE's Executive Directory overlay. Use this when the user says "
+            "close, hide, dismiss, or exit the executive directory."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}, "required": []}
     },
     {
         "name": "send_message",
@@ -1204,7 +1239,8 @@ class LiteLive:
 
         # Load customization from config
         try:
-            _cfg = json.loads(open(API_CONFIG_PATH, encoding="utf-8-sig").read())
+            with open(API_CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+                _cfg = json.load(f)
             self._asst_name = (_cfg.get("assistant_name") or "LITE").strip()
             _user_name = (_cfg.get("user_name") or "").strip()
         except Exception:
@@ -1245,7 +1281,7 @@ class LiteLive:
             f"language, which stays English no matter what.\n\n"
         )
 
-        parts = [time_ctx, identity_ctx]
+        parts = [time_ctx, identity_ctx, EXECUTIVE_DIRECTORY_CONTEXT]
         if mem_str:
             parts.append(mem_str)
         parts.append(sys_prompt)
@@ -1309,6 +1345,14 @@ class LiteLive:
             elif name == "weather_widget":
                 r = await loop.run_in_executor(None, lambda: weather_widget(parameters=args, player=self.ui))
                 result = r or "Done."
+
+            elif name == "show_executive_directory":
+                self.ui.show_executive_directory(True)
+                result = "Executive directory opened."
+
+            elif name == "hide_executive_directory":
+                self.ui.show_executive_directory(False)
+                result = "Executive directory hidden."
 
             elif name == "browser_control":
                 r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))

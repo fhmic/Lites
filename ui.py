@@ -394,6 +394,13 @@ class HudWindow(QMainWindow):
         Unknown ids just fall back to 'lite' on the JS side."""
         self._run_js(f"window.LiteHud && window.LiteHud.onAgent({json.dumps(agent_id)})")
 
+    def show_executive_directory(self, visible: bool = True):
+        """Open or close the Executive Directory overlay from Python."""
+        self._run_js(
+            "window.LiteHud && window.LiteHud.onDirectoryVisibility(" +
+            ("true" if visible else "false") + ")"
+        )
+
     # ---------- weather (background fetch, same data source as before) ----------
     def _on_weather_show(self, city: str):
         target = (city or self._last_city or "Lagos").strip()
@@ -803,6 +810,13 @@ class LiteUI:
         now, so the Active Operative badge and Executive Directory panel
         can update live. Pass 'lite' to hand control back to LITE."""
         self._win._agent_sig.emit((agent_id or "lite").strip().lower())
+
+    def show_executive_directory(self, visible: bool = True):
+        """Open or close the Executive Directory overlay from the app layer."""
+        self._win._run_js(
+            "window.LiteHud && window.LiteHud.onDirectoryVisibility(" +
+            ("true" if visible else "false") + ")"
+        )
 
     # ---------- core HUD ----------
     def set_state(self, state: str):
