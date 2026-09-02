@@ -15,6 +15,14 @@
   "fallback_api_key": "",
   "fallback_model": "",
 
+  "_comment_code_agent": "Code-writing tasks are delegated to the local Claude Code CLI. On Windows, claude.cmd lets LITE launch it without a PowerShell session. Override the executable or full command only if your Claude Code installation needs it.",
+  "claude_code_cli": "claude.cmd",
+  "claude_code_command": ["claude.cmd", "-p", "{prompt}", "--dangerously-skip-permissions", "--no-session-persistence", "--autocompact", "auto"],
+  "claude_code_timeout": 900,
+  "fcc_claude_url": "http://127.0.0.1:8082",
+  "fcc_claude_api_key": "",
+  "fcc_server_path": "~/.local/bin/fcc-server.exe",
+
   "_comment_gas": "Connects the affiliate_growth_agent tool to GAS (Growth Agent Service) — the always-on Cloudflare Worker that keeps drafting content and tracking PartnerStack/Exness even while LITE isn't running. Get gas_worker_url from `wrangler deploy`'s output; gas_worker_key is the WORKER_SHARED_SECRET you set via `wrangler secret put`. Leave blank to disable assign_job/get_report (the rest of affiliate_growth_agent still works without it).",
   "gas_worker_url": "",
   "gas_worker_key": "",

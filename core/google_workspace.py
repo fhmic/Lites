@@ -34,7 +34,9 @@ refresh token in config/google_token.json (also gitignored) keeps it
 signed in without asking again unless you revoke access.
 """
 import base64
+import html
 import sys
+import threading
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -57,6 +59,15 @@ TOKEN_PATH          = BASE_DIR / "config" / "google_token.json"
 
 _gmail_service    = None
 _calendar_service = None
+# Guards credential acquisition AND both service builds below. Without this,
+# two threads hitting Gmail/Calendar close together (the background scan
+# firing at the same moment as an on-demand check, or two on-demand calls
+# in quick succession before the first finishes) can both see the service
+# as unbuilt and both call _get_credentials() at once — if that means both
+# try to open their own local OAuth redirect listener simultaneously, that's
+# a genuine socket bind race, not a Google Console configuration issue
+# (this is what WinError 10048 / "address already in use" actually was).
+_cred_lock = threading.RLock()
 
 
 class GoogleWorkspaceNotConfigured(Exception):
@@ -79,41 +90,50 @@ def _get_credentials():
             f"in Google Cloud Console, one download."
         )
 
-    creds = None
-    if TOKEN_PATH.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+    # Serializes the whole function: without this, two threads reaching Gmail
+    # close together (the background scan firing at the same moment as an
+    # on-demand check, or two calls in quick succession) could both see no
+    # cached/valid token and both try to open their own local OAuth redirect
+    # listener at once — a genuine socket bind race (WinError 10048 on
+    # Windows), not a Google Console configuration problem.
+    with _cred_lock:
+        creds = None
+        if TOKEN_PATH.exists():
+            creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), SCOPES)
-            # Use a fixed localhost callback that matches the registered desktop-app
-            # redirect URI in Google Cloud Console. A dynamic port works for some
-            # clients, but the Google client JSON in this repo currently only allows
-            # http://localhost, so pinning the port keeps the consent loop stable and
-            # avoids redirect_uri mismatch errors.
-            creds = flow.run_local_server(port=8080, host="localhost")
-        TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), SCOPES)
+                # port=0 lets the OS assign a free port each time, avoiding any
+                # fixed-port collision — Google's loopback redirect matching
+                # (RFC 8252) ignores the port number for an http://localhost
+                # registration, so a dynamic port works against that without
+                # needing an exact port pre-registered in Cloud Console.
+                creds = flow.run_local_server(port=0, host="localhost")
+            TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+            TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
 
-    return creds
+        return creds
 
 
 def _gmail():
     global _gmail_service
-    if _gmail_service is None:
-        from googleapiclient.discovery import build
-        _gmail_service = build("gmail", "v1", credentials=_get_credentials())
-    return _gmail_service
+    with _cred_lock:
+        if _gmail_service is None:
+            from googleapiclient.discovery import build
+            _gmail_service = build("gmail", "v1", credentials=_get_credentials())
+        return _gmail_service
 
 
 def _calendar():
     global _calendar_service
-    if _calendar_service is None:
-        from googleapiclient.discovery import build
-        _calendar_service = build("calendar", "v3", credentials=_get_credentials())
-    return _calendar_service
+    with _cred_lock:
+        if _calendar_service is None:
+            from googleapiclient.discovery import build
+            _calendar_service = build("calendar", "v3", credentials=_get_credentials())
+        return _calendar_service
 
 
 def is_configured() -> bool:
@@ -151,8 +171,21 @@ def _extract_plain_text(payload: dict) -> str:
     return ""
 
 
+def _display_name(from_header: str) -> str:
+    """'National Institute of Credit... <membershipabuja@icanigeria.net>' ->
+    'National Institute of Credit...' — for UI display only. The full
+    from_header (name + address) is what actually gets used for replies;
+    this never replaces it, only sits alongside it as from_display."""
+    if "<" in from_header:
+        name = from_header.split("<")[0].strip().strip('"')
+        return name or from_header.split("<")[1].rstrip(">").strip()
+    return from_header.strip()
+
+
 def list_recent_emails(max_results: int = 15, unread_only: bool = True) -> list[dict]:
-    """Returns [{id, thread_id, from, subject, date, snippet}, ...], newest first."""
+    """Returns [{id, thread_id, from, from_display, subject, date, snippet}, ...],
+    newest first. 'from' is the raw header (needed for replies); 'from_display'
+    is the sender name only, for showing on screen."""
     q = "is:unread in:inbox -category:promotions -category:social" if unread_only else "in:inbox"
     svc = _gmail()
     resp = svc.users().messages().list(userId="me", q=q, maxResults=max_results).execute()
@@ -163,13 +196,15 @@ def list_recent_emails(max_results: int = 15, unread_only: bool = True) -> list[
             metadataHeaders=["From", "Subject", "Date"],
         ).execute()
         headers = msg.get("payload", {}).get("headers", [])
+        from_header = _header(headers, "From")
         out.append({
-            "id":        msg["id"],
-            "thread_id": msg["threadId"],
-            "from":      _header(headers, "From"),
-            "subject":   _header(headers, "Subject") or "(no subject)",
-            "date":      _header(headers, "Date"),
-            "snippet":   msg.get("snippet", ""),
+            "id":           msg["id"],
+            "thread_id":    msg["threadId"],
+            "from":         from_header,
+            "from_display": _display_name(from_header),
+            "subject":      _header(headers, "Subject") or "(no subject)",
+            "date":         _header(headers, "Date"),
+            "snippet":      html.unescape(msg.get("snippet", "")),
         })
     return out
 

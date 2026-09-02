@@ -109,7 +109,7 @@ from actions.youtube_video     import youtube_video
 from actions.desktop           import desktop_control
 from actions.browser_control   import browser_control
 from actions.file_controller   import file_controller
-from actions.code_agent         import code_agent
+from actions.code_agent         import code_agent, fcc_server_control
 from agents.rics_agent import rics_agent
 from agents.data_analytics_agent import data_analytics_agent
 from agents.fta_agent import fta_agent
@@ -552,6 +552,23 @@ TOOL_DECLARATIONS = [
                 "timeout":     {"type": "INTEGER", "description": "Max seconds to let the Claude Code session run before stopping it and verifying whatever it left behind (default 900)."},
             },
             "required": ["task"]
+        }
+    },
+    {
+        "name": "fcc_server_control",
+        "description": (
+            "Controls the local fcc-claude server used by code_agent. "
+            "Use action='start' when the user asks to start fcc, "
+            "action='stop' when they ask to close or stop the fcc server, "
+            "and action='status' to check it. This stops only the fcc server, "
+            "not LITE."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "start | stop | status"}
+            },
+            "required": ["action"]
         }
     },
     {
@@ -1422,6 +1439,10 @@ class LiteLive:
                 result = r or "Done."
                 # No show_content call here — code_agent pushes its own HUD
                 # content (a single plain-text run report).
+
+            elif name == "fcc_server_control":
+                r = await loop.run_in_executor(None, lambda: fcc_server_control(parameters=args))
+                result = r or "Done."
 
             elif name == "rics_agent":
                 r = await loop.run_in_executor(None, lambda: rics_agent(parameters=args, player=self.ui, speak=self.speak))

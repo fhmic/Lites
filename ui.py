@@ -394,13 +394,6 @@ class HudWindow(QMainWindow):
         Unknown ids just fall back to 'lite' on the JS side."""
         self._run_js(f"window.LiteHud && window.LiteHud.onAgent({json.dumps(agent_id)})")
 
-    def show_executive_directory(self, visible: bool = True):
-        """Open or close the Executive Directory overlay from Python."""
-        self._run_js(
-            "window.LiteHud && window.LiteHud.onDirectoryVisibility(" +
-            ("true" if visible else "false") + ")"
-        )
-
     # ---------- weather (background fetch, same data source as before) ----------
     def _on_weather_show(self, city: str):
         target = (city or self._last_city or "Lagos").strip()

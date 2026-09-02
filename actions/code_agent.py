@@ -73,10 +73,14 @@ def get_base_dir() -> Path:
 BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
-DEFAULT_CLAUDE_CLI     = "claude"
+DEFAULT_CLAUDE_CLI     = "claude.cmd" if os.name == "nt" else "claude"
 DEFAULT_FCC_URL        = "http://127.0.0.1:8082"
 DEFAULT_TIMEOUT_S      = 900          # 15 min — an agentic session can genuinely take a while
-DEFAULT_COMMAND_TPL    = ["claude", "-p", "{prompt}", "--dangerously-skip-permissions"]
+DEFAULT_COMMAND_TPL    = [
+    DEFAULT_CLAUDE_CLI, "-p", "{prompt}", "--dangerously-skip-permissions",
+    "--no-session-persistence", "--autocompact", "auto",
+]
+DEFAULT_FCC_SERVER     = Path.home() / ".local" / "bin" / "fcc-server.exe"
 
 AGENT_NAME = "Code Agent"
 
@@ -95,7 +99,10 @@ def _command_template(cfg: dict) -> list:
     if isinstance(tpl, list) and tpl:
         return tpl
     cmd = os.environ.get("CLAUDE_CODE_CMD") or cfg.get("claude_code_cli") or DEFAULT_CLAUDE_CLI
-    return [cmd, "-p", "{prompt}", "--dangerously-skip-permissions"]
+    return [
+        cmd, "-p", "{prompt}", "--dangerously-skip-permissions",
+        "--no-session-persistence", "--autocompact", "auto",
+    ]
 
 
 def _fcc_url(cfg: dict) -> str:
@@ -111,11 +118,86 @@ def _extra_env(cfg: dict) -> dict:
     for anyone who configured fcc-claude at the shell-profile level instead.
     """
     env = {}
-    if cfg.get("anthropic_base_url"):
-        env["ANTHROPIC_BASE_URL"] = cfg["anthropic_base_url"]
+    base_url = cfg.get("anthropic_base_url") or cfg.get("fcc_claude_url")
+    if base_url:
+        env["ANTHROPIC_BASE_URL"] = base_url
     if cfg.get("anthropic_auth_token"):
         env["ANTHROPIC_AUTH_TOKEN"] = cfg["anthropic_auth_token"]
+    if cfg.get("fcc_claude_api_key"):
+        env["ANTHROPIC_API_KEY"] = cfg["fcc_claude_api_key"]
     return env
+
+
+def _fcc_server_path(cfg: dict) -> Path:
+    configured = cfg.get("fcc_server_path") or os.environ.get("FCC_SERVER_PATH")
+    return Path(configured).expanduser() if configured else DEFAULT_FCC_SERVER
+
+
+def _fcc_reachable(url: str) -> bool:
+    try:
+        import requests
+        requests.get(url, timeout=2)
+        return True
+    except Exception:
+        return False
+
+
+def start_fcc_server(cfg: dict | None = None) -> str:
+    """Start fcc-server when needed and wait until its proxy responds."""
+    cfg = cfg or _load_config()
+    url = _fcc_url(cfg)
+    if _fcc_reachable(url):
+        return f"fcc server is already running at {url}."
+
+    server = _fcc_server_path(cfg)
+    if not server.exists():
+        return f"Couldn't start fcc server: {server} was not found."
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.Popen(
+            [str(server)], cwd=str(server.parent),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+    except Exception as exc:
+        return f"Couldn't start fcc server: {exc}"
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if _fcc_reachable(url):
+            return f"fcc server started at {url}."
+        time.sleep(0.25)
+    return f"fcc server process was launched, but {url} did not respond within 10 seconds."
+
+
+def stop_fcc_server(cfg: dict | None = None) -> str:
+    """Stop the local fcc-server process without stopping LITE."""
+    cfg = cfg or _load_config()
+    url = _fcc_url(cfg)
+    if os.name == "nt":
+        command = ["taskkill", "/IM", "fcc-server.exe", "/T", "/F"]
+    else:
+        command = ["pkill", "-f", "fcc-server"]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode == 0:
+        return "fcc server stopped. LITE is still running."
+    if not _fcc_reachable(url):
+        return "fcc server is already stopped."
+    return f"Couldn't stop fcc server: {(result.stderr or result.stdout).strip()}"
+
+
+def fcc_server_control(parameters: dict | None = None) -> str:
+    action = str((parameters or {}).get("action", "status")).strip().lower()
+    cfg = _load_config()
+    url = _fcc_url(cfg)
+    if action == "start":
+        return start_fcc_server(cfg)
+    if action == "stop":
+        return stop_fcc_server(cfg)
+    if action == "status":
+        return f"fcc server is {'running' if _fcc_reachable(url) else 'stopped'} at {url}."
+    return "Specify fcc server action: start, stop, or status."
 
 
 # ── Git helpers ──────────────────────────────────────────────────────────────
@@ -193,7 +275,8 @@ def code_agent(
     task    = (p.get("task") or p.get("description") or p.get("issue") or "").strip()
     scope   = (p.get("scope") or "self").strip().lower()
     target  = (p.get("target") or p.get("file_path") or "").strip()
-    timeout = int(p.get("timeout") or DEFAULT_TIMEOUT_S)
+    cfg = _load_config()
+    timeout = int(p.get("timeout") or cfg.get("claude_code_timeout") or DEFAULT_TIMEOUT_S)
 
     def log(msg: str):
         print(f"[{AGENT_NAME}] {msg}")
@@ -225,8 +308,6 @@ def code_agent(
     else:
         work_dir = BASE_DIR
 
-    cfg = _load_config()
-
     # ── Preflight: git ─────────────────────────────────────────────────────
     if not _is_git_repo(work_dir):
         if scope == "external":
@@ -248,14 +329,12 @@ def code_agent(
             f"config/api_keys.json to its full path."
         )
 
-    # ── Soft preflight: fcc-claude proxy reachable ──────────────────────────
+    # ── Preflight: start the fcc-claude proxy before Claude Code ─────────────
     fcc_url = _fcc_url(cfg)
-    try:
-        import requests
-        requests.get(fcc_url, timeout=2)
-    except Exception:
-        log(f"Couldn't reach fcc-claude at {fcc_url} — proceeding anyway; "
-            f"the CLI may hang or fail if it's not running.")
+    fcc_result = start_fcc_server(cfg)
+    log(fcc_result)
+    if not _fcc_reachable(fcc_url):
+        return report(f"fcc-claude is unavailable at {fcc_url}; Claude Code was not launched.")
 
     # ── Checkpoint ───────────────────────────────────────────────────────────
     checkpoint = _ensure_checkpoint(work_dir, log)

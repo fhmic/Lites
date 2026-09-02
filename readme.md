@@ -78,6 +78,19 @@ Gemini Grounded Search and DuckDuckGo run simultaneously. The first valid result
 | **Microphone** | Required for voice interaction |
 | **API Key** | None required to get started — everything except live voice works with zero configuration (DuckDuckGo search/news, text tools). Add a Gemini key for voice; optionally add a Claude key, a Groq key, and/or a custom/local endpoint (`config/api_keys.json`, see `api_keys.example.json`) as automatic fallbacks if Gemini's quota runs out. |
 
+### Claude Code agent
+
+The `code_agent` tool delegates code-writing tasks to the locally installed Claude Code CLI. Copy `config/api_keys.example.json` to `config/api_keys.json` and keep these settings (the Windows default is `claude.cmd`):
+
+```json
+"claude_code_cli": "claude.cmd",
+"claude_code_command": ["claude.cmd", "-p", "{prompt}", "--dangerously-skip-permissions", "--no-session-persistence", "--autocompact", "auto"],
+"fcc_claude_url": "http://127.0.0.1:8082",
+"fcc_claude_api_key": "freecc"
+```
+
+Claude Code must be installed and available on PATH. Start the fcc server with `fcc-start` before asking LITE to write code. LITE passes the fcc endpoint and API key to the Claude Code subprocess, including when LITE was launched outside the PowerShell session that started fcc.
+
 ---
 
 ## 🗂️ Project Structure

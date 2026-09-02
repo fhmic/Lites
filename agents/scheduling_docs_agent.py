@@ -200,7 +200,7 @@ def _not_configured_message(e: Exception) -> str:
     return str(e)
 
 
-def _do_check_inbox(p: dict) -> str:
+def _do_check_inbox(p: dict, player=None, speak=None) -> str:
     from core.google_workspace import list_recent_emails, GoogleWorkspaceNotConfigured
     try:
         emails = list_recent_emails(
@@ -215,11 +215,23 @@ def _do_check_inbox(p: dict) -> str:
     if not emails:
         return "Nothing unread in the inbox right now."
 
-    lines = [f"{len(emails)} unread email(s):"]
-    for e in emails:
-        lines.append(f"  • [{e['id']}] {e['from']} — \"{e['subject']}\": {e['snippet'][:100]}")
-    lines.append("\nTell me which one (by id, sender, or subject) if you'd like a reply drafted.")
-    return "\n".join(lines)
+    if player is not None and hasattr(player, "show_content"):
+        try:
+            columns = ["From", "Subject", "Preview"]
+            rows = [[e["from_display"][:40], e["subject"][:70], e["snippet"][:90]] for e in emails]
+            player.show_content(
+                f"INBOX — {len(emails)} unread",
+                "\n".join(f"• {e['from_display']} — \"{e['subject']}\"" for e in emails),
+                kind="table",
+                payload={"columns": columns, "rows": rows},
+            )
+        except Exception:
+            pass
+
+    return (
+        f"{len(emails)} unread — showing them on screen. Tell me which one "
+        f"(by sender or subject) if you'd like a reply drafted."
+    )
 
 
 def _find_email_by_hint(p: dict) -> dict | None:
@@ -233,7 +245,7 @@ def _find_email_by_hint(p: dict) -> dict | None:
     if not hint:
         return None
     for e in list_recent_emails(max_results=25, unread_only=False):
-        if hint in e["from"].lower() or hint in e["subject"].lower():
+        if hint in e["from"].lower() or hint in e["from_display"].lower() or hint in e["subject"].lower():
             return e
     return None
 
@@ -344,7 +356,7 @@ def _do_cancel_event(p: dict) -> str:
     return f"Cancelled — \"{title}\" was never created, no invites sent."
 
 
-def _do_list_events(p: dict) -> str:
+def _do_list_events(p: dict, player=None, speak=None) -> str:
     from core.google_workspace import list_upcoming_events, GoogleWorkspaceNotConfigured
     try:
         events = list_upcoming_events(max_results=int(p.get("max_results") or 10))
@@ -354,11 +366,24 @@ def _do_list_events(p: dict) -> str:
         return f"Couldn't reach Calendar: {e}"
     if not events:
         return "Nothing on the calendar coming up."
-    lines = ["Upcoming:"]
-    for e in events:
-        who = f" ({len(e['attendees'])} attendee(s))" if e["attendees"] else ""
-        lines.append(f"  • {e['start']} — {e['summary']}{who}")
-    return "\n".join(lines)
+
+    if player is not None and hasattr(player, "show_content"):
+        try:
+            columns = ["When", "Event", "Attendees"]
+            rows = [
+                [e["start"], e["summary"], str(len(e["attendees"])) if e["attendees"] else "—"]
+                for e in events
+            ]
+            player.show_content(
+                f"UPCOMING — {len(events)} on the calendar",
+                "\n".join(f"• {e['start']} — {e['summary']}" for e in events),
+                kind="table",
+                payload={"columns": columns, "rows": rows},
+            )
+        except Exception:
+            pass
+
+    return f"{len(events)} upcoming — showing them on screen."
 
 
 # ── Gmail: periodic background scan ─────────────────────────────────────────
@@ -454,10 +479,10 @@ def _scan_inbox_and_draft(player=None):
     if player is not None and hasattr(player, "show_content"):
         try:
             columns = ["From", "Subject", "Draft ready"]
-            rows = [[e["from"][:60], e["subject"][:60], "Yes — in Gmail Drafts"] for e, _ in drafted]
+            rows = [[e["from_display"][:40], e["subject"][:60], "Yes — in Gmail Drafts"] for e, _ in drafted]
             player.show_content(
                 f"INBOX SCAN — {n} repl{'y' if n == 1 else 'ies'} drafted for your review",
-                "\n".join(f"• {e['from']} — \"{e['subject']}\"" for e, _ in drafted),
+                "\n".join(f"• {e['from_display']} — \"{e['subject']}\"" for e, _ in drafted),
                 kind="table",
                 payload={"columns": columns, "rows": rows},
             )
@@ -503,15 +528,15 @@ def start_gmail_scan_scheduler(player=None, scan_times: list[tuple[int, int]] | 
 _ACTIONS = {
     "create_document":     _do_create_document,
     "create_presentation":  _do_create_presentation,
-    "check_inbox":          _do_check_inbox,
     "draft_reply":          _do_draft_reply,
     "schedule_event":       _do_schedule_event,
     "confirm_event":        _do_confirm_event,
     "cancel_event":         _do_cancel_event,
-    "list_events":          _do_list_events,
 }
 _ACTIONS_WITH_IO = {
     "schedule_reminder": _do_schedule_reminder,
+    "check_inbox":       _do_check_inbox,
+    "list_events":        _do_list_events,
 }
 
 
