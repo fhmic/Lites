@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from actions import computer_settings
+from actions.code_agent import _command_template
 
 
 class FakeProcess:
@@ -26,6 +27,16 @@ class FakeProcess:
 
 
 class ProcessCleanupTest(unittest.TestCase):
+    def test_code_agent_command_is_bounded_for_fcc(self):
+        command = _command_template({"claude_code_command": ["claude.cmd", "-p", "{prompt}"]})
+
+        self.assertIn("--tools", command)
+        self.assertIn("Read,Edit,Write,Bash,Glob,Grep", command)
+        self.assertIn("--setting-sources", command)
+        self.assertIn("project,local", command)
+        self.assertIn("--strict-mcp-config", command)
+        self.assertIn("--disable-slash-commands", command)
+
     def test_cleanup_reports_candidates_without_confirmation(self):
         chrome = FakeProcess(101, "chrome.exe", 900)
         protected = FakeProcess(102, "explorer.exe", 1200)
