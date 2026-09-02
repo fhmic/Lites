@@ -34,6 +34,9 @@ class ProcessCleanupTest(unittest.TestCase):
         self.assertIn("Read,Edit,Write,Bash,Glob,Grep", command)
         self.assertIn("--setting-sources", command)
         self.assertIn("project,local", command)
+        self.assertIn("--model", command)
+        self.assertIn("sonnet", command)
+        self.assertIn("--system-prompt", command)
         self.assertIn("--strict-mcp-config", command)
         self.assertIn("--disable-slash-commands", command)
 

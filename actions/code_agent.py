@@ -81,6 +81,13 @@ DEFAULT_COMMAND_TPL    = [
     "--no-session-persistence", "--autocompact", "auto",
 ]
 _BOUNDED_TOOLS = "Read,Edit,Write,Bash,Glob,Grep"
+# Use a Claude Code-recognized alias; FCC routes it to the configured free
+# provider while avoiding the CLI's unrecognized synthetic-model path.
+_FCC_MODEL = "sonnet"
+_FCC_SYSTEM_PROMPT = (
+    "You are LITE's coding agent. Work only in the supplied project directory. "
+    "Use the available coding tools, make the requested changes, and verify them."
+)
 DEFAULT_FCC_SERVER     = Path.home() / ".local" / "bin" / "fcc-server.exe"
 
 AGENT_NAME = "Code Agent"
@@ -113,6 +120,10 @@ def _command_template(cfg: dict) -> list:
         command.extend(["--tools", _BOUNDED_TOOLS])
     if "--setting-sources" not in command:
         command.extend(["--setting-sources", "project,local"])
+    if "--model" not in command:
+        command.extend(["--model", _FCC_MODEL])
+    if "--system-prompt" not in command and "--system-prompt-file" not in command:
+        command.extend(["--system-prompt", _FCC_SYSTEM_PROMPT])
     if "--strict-mcp-config" not in command:
         command.append("--strict-mcp-config")
     if "--disable-slash-commands" not in command:
