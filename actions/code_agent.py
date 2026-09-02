@@ -131,6 +131,24 @@ def _command_template(cfg: dict) -> list:
     return command
 
 
+def _minimal_command_template(command: list) -> list:
+    """Build a last-resort request with no optional Claude context."""
+    minimal = []
+    skip_next = False
+    for part in command:
+        if skip_next:
+            skip_next = False
+            continue
+        if part in ("--tools", "--setting-sources", "--model", "--system-prompt"):
+            skip_next = True
+            continue
+        if part in ("--strict-mcp-config", "--disable-slash-commands", "--autocompact", "auto"):
+            continue
+        minimal.append(part)
+    minimal.extend(["--tools", "", "--setting-sources", "project,local", "--model", "sonnet"])
+    return minimal
+
+
 def _fcc_url(cfg: dict) -> str:
     return (cfg.get("fcc_claude_url") or os.environ.get("FCC_CLAUDE_URL") or DEFAULT_FCC_URL).rstrip("/")
 
@@ -407,6 +425,24 @@ def code_agent(
         return report(f"Couldn't launch `{cli_name}` — is it installed and on PATH?")
     except Exception as e:
         return report(f"Failed to start the Claude Code session: {e}")
+
+    # Older Claude Code builds can still attach their startup/session-title
+    # payload despite the bounded command flags. Retry once with all optional
+    # tools disabled; this is safe because no project mutation happened yet.
+    if "Request too large" in cli_output and "32MB" in cli_output:
+        log("FCC rejected Claude's startup payload at 32 MB; retrying with minimal context...")
+        minimal_cmd = [
+            part.format(prompt=prompt) if isinstance(part, str) else part
+            for part in _minimal_command_template(command_tpl)
+        ]
+        try:
+            retry = subprocess.run(
+                minimal_cmd, cwd=str(work_dir), env=env,
+                capture_output=True, text=True, timeout=timeout,
+            )
+            cli_output = (retry.stdout or "") + (("\n" + retry.stderr) if retry.stderr else "")
+        except Exception as e:
+            cli_output += f"\nMinimal FCC retry failed: {e}"
 
     elapsed = time.monotonic() - started
 

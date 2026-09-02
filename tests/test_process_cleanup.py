@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from actions import computer_settings
-from actions.code_agent import _command_template
+from actions.code_agent import _command_template, _minimal_command_template
 
 
 class FakeProcess:
@@ -39,6 +39,13 @@ class ProcessCleanupTest(unittest.TestCase):
         self.assertIn("--system-prompt", command)
         self.assertIn("--strict-mcp-config", command)
         self.assertIn("--disable-slash-commands", command)
+
+    def test_code_agent_has_minimal_fcc_fallback(self):
+        command = _minimal_command_template(["claude.cmd", "-p", "{prompt}", "--tools", "Read", "--model", "bad"])
+
+        self.assertIn("--tools", command)
+        self.assertEqual(command[command.index("--tools") + 1], "")
+        self.assertNotIn("bad", command)
 
     def test_cleanup_reports_candidates_without_confirmation(self):
         chrome = FakeProcess(101, "chrome.exe", 900)
