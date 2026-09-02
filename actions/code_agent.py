@@ -89,6 +89,7 @@ _FCC_SYSTEM_PROMPT = (
     "Use the available coding tools, make the requested changes, and verify them."
 )
 DEFAULT_FCC_SERVER     = Path.home() / ".local" / "bin" / "fcc-server.exe"
+DEFAULT_CLINE_ADAPTER  = Path.home() / ".local" / "bin" / "fcc-cline.exe"
 
 AGENT_NAME = "Code Agent"
 
@@ -175,6 +176,36 @@ def _extra_env(cfg: dict) -> dict:
 def _fcc_server_path(cfg: dict) -> Path:
     configured = cfg.get("fcc_server_path") or os.environ.get("FCC_SERVER_PATH")
     return Path(configured).expanduser() if configured else DEFAULT_FCC_SERVER
+
+
+def _cline_adapter_path(cfg: dict) -> Path:
+    configured = cfg.get("cline_adapter_path") or os.environ.get("CLINE_ADAPTER_PATH")
+    return Path(configured).expanduser() if configured else DEFAULT_CLINE_ADAPTER
+
+
+def _run_cline_fallback(cfg: dict, work_dir: Path, task: str, timeout: int) -> str:
+    """Run FCC's Cline adapter after Claude Code rejects its startup payload."""
+    adapter = _cline_adapter_path(cfg)
+    if not adapter.exists():
+        return f"Cline fallback unavailable: {adapter} was not found."
+
+    env = {**os.environ, **_extra_env(cfg)}
+    npm_bin = Path.home() / "AppData" / "Roaming" / "npm"
+    if npm_bin.exists():
+        env["PATH"] = str(npm_bin) + os.pathsep + env.get("PATH", "")
+    command = [
+        str(adapter),
+        f"Work in {work_dir}. Complete this task, verify the result, and make the changes directly: {task}",
+        "--cwd", str(work_dir), "--auto-approve", "true", "--compaction", "off",
+        "--timeout", str(timeout),
+    ]
+    try:
+        result = subprocess.run(command, cwd=str(work_dir), env=env,
+                                capture_output=True, text=True, timeout=timeout)
+    except Exception as exc:
+        return f"Cline fallback failed to start: {exc}"
+    output = (result.stdout or "") + (("\n" + result.stderr) if result.stderr else "")
+    return output.strip() or f"Cline fallback exited with code {result.returncode}."
 
 
 def _fcc_reachable(url: str) -> bool:
@@ -443,6 +474,10 @@ def code_agent(
             cli_output = (retry.stdout or "") + (("\n" + retry.stderr) if retry.stderr else "")
         except Exception as e:
             cli_output += f"\nMinimal FCC retry failed: {e}"
+
+    if "Request too large" in cli_output and "32MB" in cli_output:
+        log("Claude Code still exceeded FCC's limit; trying the Cline fallback...")
+        cli_output = f"{cli_output}\n[Cline fallback]\n{_run_cline_fallback(cfg, work_dir, task, timeout)}"
 
     elapsed = time.monotonic() - started
 

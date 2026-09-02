@@ -459,6 +459,19 @@ class _BrowserSession:
         self._context: BrowserContext | None = None
         self._page:    Page           | None = None
 
+        # Set when the real Chrome/Edge/etc. profile couldn't be opened
+        # (almost always because the user's real browser is already running —
+        # Chrome locks its profile dir against a second process) and this
+        # session fell back to a separate, dedicated automation profile
+        # instead. That profile starts out logged into nothing, which is
+        # exactly why "open Gmail" (native, real browser) can work while
+        # "click the first email" (this session) silently lands on a sign-in
+        # page — there was previously no user-facing signal that this
+        # happened at all. _fallback_notified guards against repeating the
+        # notification on every single action in the same session.
+        self.used_lite_fallback_profile = False
+        self._fallback_notified         = False
+
     def start(self):
         if self._thread and self._thread.is_alive():
             return
@@ -551,6 +564,7 @@ class _BrowserSession:
                 lite = str(Path.home() / ".lite_profiles" / "firefox_lite")
                 Path(lite).mkdir(parents=True, exist_ok=True)
                 self._context = await engine_obj.launch_persistent_context(lite, **kwargs)
+                self.used_lite_fallback_profile = True
 
             self._page = await self._adopt_page()
             print(f"[Browser] ✅ Firefox launched")
@@ -618,6 +632,7 @@ class _BrowserSession:
         try:
             self._context = await engine_obj.launch_persistent_context(lite_profile, **kwargs)
             self._page = await self._adopt_page()
+            self.used_lite_fallback_profile = True
             print(f"[Browser] ✅ Launched [{label}] with LITE profile "
                   f"(sign-ins persist across sessions)")
         except Exception as e2:
@@ -1004,6 +1019,22 @@ def browser_control(
         _log(player, result)
         return result
 
+    if sess.used_lite_fallback_profile and not sess._fallback_notified:
+        sess._fallback_notified = True
+        msg = (
+            f"Your real {sess.browser_name} was already open, so clicking/typing is "
+            f"happening in a separate automation window instead (Chrome-based browsers "
+            f"won't let two processes share one profile). That window starts logged "
+            f"into nothing — sign into whatever site you want me to click things on "
+            f"there once; it stays signed in after that."
+        )
+        if player is not None and hasattr(player, "notify"):
+            try:
+                player.notify("BROWSER", msg)
+            except Exception:
+                pass
+        _log(player, msg)
+
     try:
         last = _registry.pop_native_url()
         if last:
@@ -1048,6 +1079,20 @@ def browser_control(
         result = f"Browser action '{action}' timed out (60s)."
     except Exception as e:
         result = f"Browser error ({action}): {e}"
+
+    if action in ("click", "type", "smart_click", "smart_type", "fill_form", "get_text"):
+        try:
+            current_url = sess.run(sess.get_url(), timeout=10).lower()
+            if any(s in current_url for s in (
+                "accounts.google.com", "login.microsoftonline.com",
+                "/signin", "/sign-in", "/login", "/log-in",
+            )):
+                result += (
+                    " — heads up, this automation window looks like it's sitting on a "
+                    "sign-in page, not the actual site. Sign in there once and try again."
+                )
+        except Exception:
+            pass
 
     _log(player, result)
     return result

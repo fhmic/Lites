@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from actions import computer_settings
-from actions.code_agent import _command_template, _minimal_command_template
+from actions.code_agent import _command_template, _minimal_command_template, _cline_adapter_path
 
 
 class FakeProcess:
@@ -46,6 +46,9 @@ class ProcessCleanupTest(unittest.TestCase):
         self.assertIn("--tools", command)
         self.assertEqual(command[command.index("--tools") + 1], "")
         self.assertNotIn("bad", command)
+
+    def test_cline_adapter_has_configurable_path(self):
+        self.assertEqual(_cline_adapter_path({}).name, "fcc-cline.exe")
 
     def test_cleanup_reports_candidates_without_confirmation(self):
         chrome = FakeProcess(101, "chrome.exe", 900)
