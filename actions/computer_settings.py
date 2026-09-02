@@ -7,6 +7,8 @@ import subprocess
 import platform
 from pathlib import Path
 
+import psutil
+
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
@@ -22,6 +24,20 @@ except ImportError:
     _PYPERCLIP = False
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
+
+# Only user applications that are reasonable cleanup candidates. System,
+# security, driver, and LITE processes are never eligible for termination.
+_CLEANUP_ALLOWLIST = {
+    "chrome", "msedge", "firefox", "opera", "brave", "vivaldi",
+    "spotify", "discord", "slack", "teams", "steam", "epicgameslauncher",
+    "xboxapp", "gamebar", "obs64", "obs",
+}
+_CLEANUP_PROTECTED = {
+    "explorer", "system", "registry", "smss", "csrss", "wininit",
+    "services", "lsass", "svchost", "winlogon", "dwm", "taskhostw",
+    "searchindexer", "securityhealthservice", "antimalware service executable",
+    "lite", "python", "pythonw",
+}
 
 if _OS == "Windows":
     _WIN_HIDE: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
@@ -258,6 +274,74 @@ def open_task_manager():
             if subprocess.run(["which", cmd[0]], capture_output=True).returncode == 0:
                 subprocess.Popen(cmd)
                 break
+
+
+def _process_basename(name: str) -> str:
+    return Path(name.strip().lower()).stem
+
+
+def process_cleanup(parameters: dict | None = None) -> str:
+    """Report or close explicitly approved, high-memory user applications."""
+    params = parameters or {}
+    requested = str(
+        params.get("process_name") or params.get("process") or params.get("target") or ""
+    ).strip()
+    target = _process_basename(requested) if requested else ""
+    try:
+        minimum_mb = max(100, min(10_000, int(params.get("min_memory_mb", 500))))
+        max_processes = max(1, min(5, int(params.get("max_processes", 3))))
+    except (TypeError, ValueError):
+        return "Invalid cleanup limits. Use a memory threshold and process limit as numbers."
+
+    candidates = []
+    current_pid = psutil.Process().pid
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            if proc.info["pid"] == current_pid:
+                continue
+            name = str(proc.info.get("name") or "")
+            base = _process_basename(name)
+            if not name or base in _CLEANUP_PROTECTED or base not in _CLEANUP_ALLOWLIST:
+                continue
+            memory_mb = proc.memory_info().rss / 1024 / 1024
+            if memory_mb < minimum_mb or (target and base != target):
+                continue
+            candidates.append((proc, name, memory_mb))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            continue
+
+    candidates.sort(key=lambda item: item[2], reverse=True)
+    candidates = candidates[:max_processes]
+    if not candidates:
+        if target:
+            return f"No eligible process named '{requested}' was found above {minimum_mb} MB."
+        return f"No approved cleanup candidates were found above {minimum_mb} MB."
+
+    confirmed = str(params.get("confirmed", "")).lower() in ("yes", "true", "1", "confirm")
+    summary = ", ".join(f"{name} ({memory_mb:.0f} MB)" for _, name, memory_mb in candidates)
+    if not confirmed or not target:
+        if target and not confirmed:
+            return f"Cleanup candidate: {summary}. Confirm with confirmed=yes to close it."
+        return (
+            f"Cleanup candidates: {summary}. No processes were closed. "
+            "Specify process_name and confirmed=yes to close one."
+        )
+
+    closed = []
+    failed = []
+    for proc, name, _ in candidates:
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+            closed.append(name)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            closed.append(name)
+        except (psutil.AccessDenied, psutil.TimeoutExpired, OSError) as exc:
+            failed.append(f"{name}: {exc}")
+    result = f"Closed {len(closed)} approved process(es): {', '.join(closed) or 'none'}."
+    if failed:
+        result += f" Could not close: {', '.join(failed)}."
+    return result
 
 
 def focus_search():
@@ -546,6 +630,9 @@ ACTION_MAP: dict[str, callable] = {
     "switch_window":       switch_window,
     "show_desktop":        show_desktop,
     "task_manager":        open_task_manager,
+    "cleanup_processes":   process_cleanup,
+    "cleanup_process":     process_cleanup,
+    "free_memory":         process_cleanup,
     "focus_search":        focus_search,
     "refresh_page":        refresh_page,
     "reload":              refresh_page,
@@ -628,9 +715,6 @@ def computer_settings(
     player=None,
     session_memory=None,
 ) -> str:
-    if not _PYAUTOGUI:
-        return "pyautogui is not installed. Run: pip install pyautogui"
-
     params      = parameters or {}
     raw_action  = params.get("action", "").strip()
     description = params.get("description", "").strip()
@@ -643,6 +727,14 @@ def computer_settings(
             value = detected.get("value")
 
     action = raw_action.lower().strip().replace(" ", "_").replace("-", "_")
+
+    # Process cleanup is headless and must remain available even on installs
+    # that do not include the optional GUI automation dependency.
+    if action in ("cleanup_processes", "cleanup_process", "free_memory", "close_process"):
+        return process_cleanup(params)
+
+    if not _PYAUTOGUI:
+        return "pyautogui is not installed. Run: pip install pyautogui"
 
     if not action:
         return "No action could be determined."

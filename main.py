@@ -446,7 +446,9 @@ TOOL_DECLARATIONS = [
         "description": (
             "Controls the computer: volume, brightness, window management, keyboard shortcuts, "
             "typing text on screen, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, "
-            "scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. "
+            "scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page, "
+            "and conservative process cleanup to free memory. Cleanup only closes approved "
+            "user applications after the user confirms a named process. "
             "Use for ANY single computer control command."
         ),
         "parameters": {
@@ -454,7 +456,11 @@ TOOL_DECLARATIONS = [
             "properties": {
                 "action":      {"type": "STRING", "description": "The action to perform"},
                 "description": {"type": "STRING", "description": "Natural language description of what to do"},
-                "value":       {"type": "STRING", "description": "Optional value: volume level, text to type, etc."}
+                "value":       {"type": "STRING", "description": "Optional value: volume level, text to type, etc."},
+                "process_name": {"type": "STRING", "description": "Exact approved user process to close, such as chrome or spotify"},
+                "min_memory_mb": {"type": "INTEGER", "description": "Minimum resident memory for candidate discovery (default 500 MB)"},
+                "max_processes": {"type": "INTEGER", "description": "Maximum candidates to report (1-5, default 3)"},
+                "confirmed": {"type": "STRING", "description": "Must be yes to close the named process; omit for report-only discovery"}
             },
             "required": []
         }

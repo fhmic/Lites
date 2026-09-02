@@ -80,6 +80,7 @@ DEFAULT_COMMAND_TPL    = [
     DEFAULT_CLAUDE_CLI, "-p", "{prompt}", "--dangerously-skip-permissions",
     "--no-session-persistence", "--autocompact", "auto",
 ]
+_BOUNDED_TOOLS = "Read,Edit,Write,Bash,Glob,Grep"
 DEFAULT_FCC_SERVER     = Path.home() / ".local" / "bin" / "fcc-server.exe"
 
 AGENT_NAME = "Code Agent"
@@ -97,12 +98,26 @@ def _load_config() -> dict:
 def _command_template(cfg: dict) -> list:
     tpl = cfg.get("claude_code_command")
     if isinstance(tpl, list) and tpl:
-        return tpl
-    cmd = os.environ.get("CLAUDE_CODE_CMD") or cfg.get("claude_code_cli") or DEFAULT_CLAUDE_CLI
-    return [
-        cmd, "-p", "{prompt}", "--dangerously-skip-permissions",
-        "--no-session-persistence", "--autocompact", "auto",
-    ]
+        command = list(tpl)
+    else:
+        cmd = os.environ.get("CLAUDE_CODE_CMD") or cfg.get("claude_code_cli") or DEFAULT_CLAUDE_CLI
+        command = [
+            cmd, "-p", "{prompt}", "--dangerously-skip-permissions",
+            "--no-session-persistence", "--autocompact", "auto",
+        ]
+
+    # FCC rejects the current Claude Code default tool/system payload at about
+    # 32 MB. Keep the agentic coding tools, but omit image-capable and optional
+    # integrations that can accumulate attachments before the first turn.
+    if "--tools" not in command:
+        command.extend(["--tools", _BOUNDED_TOOLS])
+    if "--setting-sources" not in command:
+        command.extend(["--setting-sources", "project,local"])
+    if "--strict-mcp-config" not in command:
+        command.append("--strict-mcp-config")
+    if "--disable-slash-commands" not in command:
+        command.append("--disable-slash-commands")
+    return command
 
 
 def _fcc_url(cfg: dict) -> str:
@@ -355,7 +370,13 @@ def code_agent(
     )
     cmd = [part.format(prompt=prompt) if isinstance(part, str) else part for part in command_tpl]
 
-    env = {**os.environ, **_extra_env(cfg)}
+    env = {
+        **os.environ,
+        **_extra_env(cfg),
+        # The FCC model is synthetic and not in Claude Code's built-in model
+        # catalog; without this, the CLI applies its own window assumptions.
+        "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1",
+    }
 
     started = time.monotonic()
     try:
