@@ -869,27 +869,31 @@ TOOL_DECLARATIONS = [
             "(reporting to LITE). Capabilities: (1) schedule_reminder — a one-off OS-level "
             "reminder; (2) create_document / (3) create_presentation — generates a .docx/"
             ".pptx from a description or outline; (4) check_inbox — lists recent unread "
-            "Gmail with sender/subject/snippet; (5) draft_reply — drafts a reply to a "
-            "specific email (by email_id from check_inbox, or a from/subject hint) per "
+            "Gmail with sender/subject/snippet ONLY (not the full body — use read_email for "
+            "that); (5) read_email — opens a specific email (by email_id from check_inbox, "
+            "or a from/subject hint) and shows its FULL body on screen; call this whenever "
+            "Felix asks what an email actually says, to open/read one, or anything beyond "
+            "the snippet check_inbox already showed; (6) draft_reply — drafts a reply to a "
+            "specific email (same id/hint matching as read_email) per "
             "Felix's instructions, saved to Gmail Drafts for his own review and send — "
-            "this NEVER sends an email itself, only drafts; (6) schedule_event — creates a "
+            "this NEVER sends an email itself, only drafts; (7) schedule_event — creates a "
             "calendar event; if it has attendees, this does NOT create it immediately (an "
             "invite email fires the instant it's created) — it instead describes exactly "
             "what would be created and returns a pending event_id, and you must relay that "
             "to Felix and wait for him to explicitly say to confirm or cancel before "
-            "calling (7)/(8); (7) confirm_event(event_id) — actually creates a pending "
+            "calling (8)/(9); (8) confirm_event(event_id) — actually creates a pending "
             "event and sends the invites, only after Felix explicitly confirms; "
-            "(8) cancel_event(event_id) — discards a pending event, no invites sent; "
-            "(9) list_events — upcoming calendar items, for context or conflict-checking. "
+            "(9) cancel_event(event_id) — discards a pending event, no invites sent; "
+            "(10) list_events — upcoming calendar items, for context or conflict-checking. "
             "A background pass also periodically scans unread Gmail on its own and drafts "
             "replies for anything that looks like it genuinely needs one (skipping "
             "newsletters/notifications), surfacing them here without being asked — "
-            "check_inbox/draft_reply are for when Felix explicitly asks about email."
+            "check_inbox/read_email/draft_reply are for when Felix explicitly asks about email."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":       {"type": "STRING", "description": "schedule_reminder | create_document | create_presentation | check_inbox | draft_reply | schedule_event | confirm_event | cancel_event | list_events (inferred from context only for the first three; required for the rest)"},
+                "action":       {"type": "STRING", "description": "schedule_reminder | create_document | create_presentation | check_inbox | read_email | draft_reply | schedule_event | confirm_event | cancel_event | list_events (inferred from context only for the first three; required for the rest)"},
                 "date":         {"type": "STRING", "description": "For schedule_reminder: YYYY-MM-DD."},
                 "time":         {"type": "STRING", "description": "For schedule_reminder: HH:MM (24-hour)."},
                 "message":      {"type": "STRING", "description": "For schedule_reminder: what the reminder should say."},

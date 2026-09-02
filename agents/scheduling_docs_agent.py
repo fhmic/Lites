@@ -250,6 +250,36 @@ def _find_email_by_hint(p: dict) -> dict | None:
     return None
 
 
+def _do_read_email(p: dict, player=None, speak=None) -> str:
+    from core.google_workspace import get_email_body, GoogleWorkspaceNotConfigured
+    try:
+        target = _find_email_by_hint(p)
+        if not target:
+            return "Couldn't find that email — give me the id from check_inbox, or a sender/subject to match on."
+
+        full = get_email_body(target["id"])
+        body = full["body"].strip() or "(no readable text in this email)"
+
+        if player is not None and hasattr(player, "show_content"):
+            try:
+                player.show_content(
+                    full["subject"],
+                    f"From: {full['from']}\n\n{body}",
+                )
+            except Exception:
+                pass
+
+        preview = body[:600] + ("..." if len(body) > 600 else "")
+        return (
+            f"From {full['from']}, subject \"{full['subject']}\" — showing the full "
+            f"email on screen. {preview}"
+        )
+    except GoogleWorkspaceNotConfigured as e:
+        return _not_configured_message(e)
+    except Exception as e:
+        return f"Couldn't open that email: {e}"
+
+
 def _do_draft_reply(p: dict) -> str:
     from core.google_workspace import get_email_body, create_draft_reply, GoogleWorkspaceNotConfigured
     try:
@@ -537,6 +567,7 @@ _ACTIONS_WITH_IO = {
     "schedule_reminder": _do_schedule_reminder,
     "check_inbox":       _do_check_inbox,
     "list_events":        _do_list_events,
+    "read_email":         _do_read_email,
 }
 
 
