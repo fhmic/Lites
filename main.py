@@ -94,7 +94,9 @@ from ui import LiteUI
 from core.audio_devices import (
     input_device_name,
     output_device_name,
+    resample_audio,
     resolve_input_device,
+    resolve_input_stream,
     resolve_output_device,
 )
 from memory.memory_manager import (
@@ -188,6 +190,7 @@ CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
+INPUT_AUDIO_MIME    = "audio/pcm;rate=16000"
 
 def _get_api_key() -> str:
     """
@@ -489,7 +492,7 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"},
+                "action":      {"type": "STRING", "description": "go_to | search | click | type | scroll | zoom | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | list_tabs | deep_dive | switch | list_browsers | close | close_all"},
                 "browser":     {"type": "STRING", "description": "Target browser: chrome | edge | firefox | opera | operagx | brave | vivaldi | safari. Omit to use the currently active browser."},
                 "url":         {"type": "STRING", "description": "URL for go_to / new_tab action"},
                 "query":       {"type": "STRING", "description": "Search query for search action"},
@@ -499,6 +502,8 @@ TOOL_DECLARATIONS = [
                 "description": {"type": "STRING", "description": "Element description for smart_click/smart_type"},
                 "direction":   {"type": "STRING", "description": "up | down for scroll"},
                 "amount":      {"type": "INTEGER", "description": "Scroll amount in pixels (default: 500)"},
+                "max_pages":  {"type": "INTEGER", "description": "For deep_dive: maximum pages to inspect, 1-5 (default 3)"},
+                "fields":     {"type": "OBJECT", "description": "For fill_form: map CSS selectors or field labels to values"},
                 "key":         {"type": "STRING", "description": "Key name for press action (e.g. Enter, Escape, F5)"},
                 "path":        {"type": "STRING", "description": "Save path for screenshot"},
                 "incognito":   {"type": "BOOLEAN", "description": "Open in private/incognito mode"},
@@ -955,11 +960,11 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "computer_control",
-        "description": "Direct computer control: type, click, hotkeys, scroll, move mouse, screenshots, find elements on screen.",
+            "description": "Direct computer control: type, click buttons/icons, hotkeys, scroll, zoom, back/forward navigation, move mouse, screenshots, and find elements on screen.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | random_data | user_data"},
+                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | zoom | back | forward | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | random_data | user_data"},
                 "text":        {"type": "STRING", "description": "Text to type or paste"},
                 "x":           {"type": "INTEGER", "description": "X coordinate"},
                 "y":           {"type": "INTEGER", "description": "Y coordinate"},
@@ -1621,25 +1626,26 @@ class LiteLive:
         print("[LITE] 🎤 Mic started")
         loop = asyncio.get_event_loop()
 
+        def enqueue_mic_audio(data):
+            """Preserve every captured block until the live sender accepts it."""
+            if self.out_queue is None:
+                return
+            self.out_queue.put_nowait({"data": data, "mime_type": INPUT_AUDIO_MIME})
+
         def callback(indata, frames, time_info, status):
             if status:
                 print(f"[LITE] ⚠️ Mic status: {status}")
-            with self._speaking_lock:
-                lite_speaking = self._is_speaking
-            if not lite_speaking and not self.ui.muted and not self._phone_active:
-                data = indata.tobytes()
-                loop.call_soon_threadsafe(
-                    self.out_queue.put_nowait,
-                    {"data": data, "mime_type": "audio/pcm"}
-                )
+            if not self.ui.muted and not self._phone_active:
+                data = resample_audio(indata[:, 0], input_rate, SEND_SAMPLE_RATE).tobytes()
+                loop.call_soon_threadsafe(enqueue_mic_audio, data)
 
         while True:
             try:
-                input_device = resolve_input_device(SEND_SAMPLE_RATE)
+                input_device, input_rate = resolve_input_stream(SEND_SAMPLE_RATE)
                 print(f"[LITE] 🎤 Input device: {input_device_name(input_device)}")
                 with sd.InputStream(
                     device=input_device,
-                    samplerate=SEND_SAMPLE_RATE,
+                    samplerate=input_rate,
                     channels=CHANNELS,
                     dtype="int16",
                     blocksize=CHUNK_SIZE,
@@ -2489,7 +2495,12 @@ class LiteLive:
                 ):
                     self.session          = session
                     self.audio_in_queue   = asyncio.Queue()
-                    self.out_queue        = asyncio.Queue(maxsize=200)
+                    # Audio must not be dropped during a short network/API stall;
+                    # dropping old chunks truncates voice commands.
+                    # Keep live audio low-latency. An unbounded queue can preserve
+                    # stale speech for minutes when the network briefly stalls,
+                    # making the next command appear to be heard intermittently.
+                    self.out_queue        = asyncio.Queue(maxsize=50)
                     self._turn_done_event = asyncio.Event()
 
                     # Reset transient state that must not carry over from a previous session

@@ -719,6 +719,53 @@ class _BrowserSession:
         except Exception as e:
             return f"Scroll error: {e}"
 
+    async def zoom(self, direction: str = "in", amount: int = 1) -> str:
+        page = await self._get_page()
+        key = "=" if direction.lower() == "in" else "-"
+        if direction.lower() in ("reset", "normal"):
+            await page.keyboard.press("Control+0")
+            return "Browser zoom reset."
+        for _ in range(max(1, min(int(amount), 5))):
+            await page.keyboard.press(f"Control+{key}")
+        return f"Browser zoomed {direction}."
+
+    async def list_tabs(self) -> str:
+        await self._get_page()
+        pages = self._context.pages
+        lines = []
+        for index, page in enumerate(pages):
+            marker = " *" if page is self._page else ""
+            lines.append(f"{index}: {page.url}{marker}")
+        return "Open tabs:\n" + "\n".join(lines)
+
+    async def deep_dive(self, query: str = "", url: str = "", max_pages: int = 3) -> str:
+        """Search/open a site and inspect a small, bounded set of relevant links."""
+        if query and not url:
+            await self.search(query)
+        elif url:
+            await self.go_to(url)
+
+        page = await self._get_page()
+        limit = max(1, min(int(max_pages), 5))
+        links = await page.locator("a[href]").evaluate_all(
+            "els => els.map(a => ({text: (a.innerText || a.getAttribute('aria-label') || '').trim(), href: a.href}))"
+        )
+        candidates = []
+        terms = [word.lower() for word in (query or "").split() if len(word) > 2]
+        for link in links:
+            text = f"{link.get('text', '')} {link.get('href', '')}".lower()
+            if link.get("href", "").startswith(("http://", "https://")) and (not terms or any(term in text for term in terms)):
+                if link["href"] not in [item["href"] for item in candidates]:
+                    candidates.append(link)
+        excerpts = [f"SOURCE: {page.url}\n{(await page.inner_text('body'))[:3000]}"]
+        for link in candidates[:limit - 1]:
+            try:
+                await page.goto(link["href"], wait_until="domcontentloaded", timeout=15_000)
+                excerpts.append(f"SOURCE: {page.url}\n{(await page.inner_text('body'))[:3000]}")
+            except Exception as e:
+                excerpts.append(f"SOURCE FAILED: {link['href']} ({e})")
+        return "\n\n---\n\n".join(excerpts)[:12_000]
+
     async def press(self, key: str) -> str:
         page = await self._get_page()
         try:
@@ -1050,6 +1097,13 @@ def browser_control(
                 params.get("selector"), params.get("text", ""), params.get("clear_first", True)))
         elif action == "scroll":
             result = sess.run(sess.scroll(params.get("direction", "down"), int(params.get("amount", 500))))
+        elif action == "zoom":
+            result = sess.run(sess.zoom(params.get("direction", "in"), int(params.get("amount", 1))))
+        elif action == "list_tabs":
+            result = sess.run(sess.list_tabs())
+        elif action == "deep_dive":
+            result = sess.run(sess.deep_dive(
+                params.get("query", ""), params.get("url", ""), int(params.get("max_pages", 3))))
         elif action == "fill_form":
             result = sess.run(sess.fill_form(params.get("fields", {})))
         elif action == "smart_click":

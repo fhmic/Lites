@@ -186,6 +186,7 @@ def list_recent_emails(max_results: int = 15, unread_only: bool = True) -> list[
             "id":        msg["id"],
             "thread_id": msg["threadId"],
             "from":      _header(headers, "From"),
+            "from_display": _header(headers, "From"),
             "subject":   _header(headers, "Subject") or "(no subject)",
             "date":      _header(headers, "Date"),
             "snippet":   msg.get("snippet", ""),

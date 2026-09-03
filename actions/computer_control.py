@@ -458,6 +458,18 @@ def computer_control(
                 amount=int(params.get("amount", 3)),
             )
 
+        if action == "zoom":
+            direction = params.get("direction", "in").lower()
+            if direction == "reset":
+                return _hotkey("ctrl", "0")
+            key = "=" if direction == "in" else "-"
+            for _ in range(max(1, min(int(params.get("amount", 1)), 5))):
+                _hotkey("ctrl", key)
+            return f"Zoomed {direction}."
+
+        if action in ("back", "forward"):
+            return _hotkey("alt", "left" if action == "back" else "right")
+
         if action == "copy":
             return _clipboard_get()
 

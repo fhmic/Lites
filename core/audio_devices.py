@@ -1,6 +1,7 @@
 """Audio device selection for LITE's microphone input."""
 
 import sounddevice as sd
+import numpy as np
 
 
 def _default_device_index(direction: int) -> int | None:
@@ -15,6 +16,10 @@ def _default_device_index(direction: int) -> int | None:
 
 
 def resolve_input_device(sample_rate: int = 16000) -> int:
+    return resolve_input_stream(sample_rate)[0]
+
+
+def resolve_input_stream(sample_rate: int = 16000) -> tuple[int, int]:
     """Return a usable input device compatible with the requested sample rate."""
     devices = list(sd.query_devices())
     default_input = _default_device_index(0)
@@ -40,11 +45,20 @@ def resolve_input_device(sample_rate: int = 16000) -> int:
         for index, device in enumerate(devices)
         if device.get("max_input_channels", 0) > 0
     ]
-    candidates = [
+    candidates = []
+    if (
+        default_input is not None
+        and default_input < len(devices)
+        and devices[default_input].get("max_input_channels", 0) > 0
+        and any(term in devices[default_input].get("name", "").lower() for term in internal_terms)
+    ):
+        candidates.append(default_input)
+    candidates.extend(
         index for index, device in enumerate(devices)
-        if device.get("max_input_channels", 0) > 0
+        if index not in candidates
+        and device.get("max_input_channels", 0) > 0
         and any(term in device.get("name", "").lower() for term in internal_terms)
-    ]
+    )
     candidates.extend(
         index for index, device in input_devices
         if index not in candidates
@@ -76,9 +90,21 @@ def resolve_input_device(sample_rate: int = 16000) -> int:
                 dtype="int16",
                 samplerate=sample_rate,
             )
+            return index, sample_rate
         except Exception:
-            continue
-        return index
+            native_rate = int(device.get("default_samplerate", 0))
+            if native_rate <= 0 or native_rate == sample_rate:
+                continue
+            try:
+                sd.check_input_settings(
+                    device=index,
+                    channels=1,
+                    dtype="int16",
+                    samplerate=native_rate,
+                )
+            except Exception:
+                continue
+            return index, native_rate
 
     available = [
         f"{index}: {device.get('name', 'Unknown')}"
@@ -143,3 +169,15 @@ def output_device_name(device_index: int) -> str:
         return str(sd.query_devices(device_index).get("name", "Unknown"))
     except Exception:
         return f"device {device_index}"
+
+
+def resample_audio(samples, source_rate: int, target_rate: int):
+    """Convert a mono block to target_rate without an extra audio package."""
+    if source_rate == target_rate:
+        return samples
+    source = np.asarray(samples)
+    target_length = max(1, round(len(source) * target_rate / source_rate))
+    source_positions = np.linspace(0, len(source) - 1, len(source))
+    target_positions = np.linspace(0, len(source) - 1, target_length)
+    converted = np.interp(target_positions, source_positions, source)
+    return converted.astype(source.dtype, copy=False)

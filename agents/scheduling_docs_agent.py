@@ -218,10 +218,10 @@ def _do_check_inbox(p: dict, player=None, speak=None) -> str:
     if player is not None and hasattr(player, "show_content"):
         try:
             columns = ["From", "Subject", "Preview"]
-            rows = [[e["from_display"][:40], e["subject"][:70], e["snippet"][:90]] for e in emails]
+            rows = [[(e.get("from_display") or e.get("from", ""))[:40], e["subject"][:70], e["snippet"][:90]] for e in emails]
             player.show_content(
                 f"INBOX — {len(emails)} unread",
-                "\n".join(f"• {e['from_display']} — \"{e['subject']}\"" for e in emails),
+                "\n".join(f"• {e.get('from_display') or e.get('from', '')} — \"{e['subject']}\"" for e in emails),
                 kind="table",
                 payload={"columns": columns, "rows": rows},
             )
@@ -245,7 +245,8 @@ def _find_email_by_hint(p: dict) -> dict | None:
     if not hint:
         return None
     for e in list_recent_emails(max_results=25, unread_only=False):
-        if hint in e["from"].lower() or hint in e["from_display"].lower() or hint in e["subject"].lower():
+        sender = e.get("from_display") or e.get("from", "")
+        if hint in e.get("from", "").lower() or hint in sender.lower() or hint in e["subject"].lower():
             return e
     return None
 
