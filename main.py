@@ -91,6 +91,12 @@ import numpy as np
 from google import genai
 from google.genai import types
 from ui import LiteUI
+from core.audio_devices import (
+    input_device_name,
+    output_device_name,
+    resolve_input_device,
+    resolve_output_device,
+)
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
@@ -1616,6 +1622,8 @@ class LiteLive:
         loop = asyncio.get_event_loop()
 
         def callback(indata, frames, time_info, status):
+            if status:
+                print(f"[LITE] ⚠️ Mic status: {status}")
             with self._speaking_lock:
                 lite_speaking = self._is_speaking
             if not lite_speaking and not self.ui.muted and not self._phone_active:
@@ -1625,20 +1633,25 @@ class LiteLive:
                     {"data": data, "mime_type": "audio/pcm"}
                 )
 
-        try:
-            with sd.InputStream(
-                samplerate=SEND_SAMPLE_RATE,
-                channels=CHANNELS,
-                dtype="int16",
-                blocksize=CHUNK_SIZE,
-                callback=callback,
-            ):
-                print("[LITE] 🎤 Mic stream open")
-                while True:
-                    await asyncio.sleep(0.1)
-        except Exception as e:
-            print(f"[LITE] ❌ Mic: {e}")
-            raise
+        while True:
+            try:
+                input_device = resolve_input_device(SEND_SAMPLE_RATE)
+                print(f"[LITE] 🎤 Input device: {input_device_name(input_device)}")
+                with sd.InputStream(
+                    device=input_device,
+                    samplerate=SEND_SAMPLE_RATE,
+                    channels=CHANNELS,
+                    dtype="int16",
+                    blocksize=CHUNK_SIZE,
+                    callback=callback,
+                ):
+                    print("[LITE] 🎤 Mic stream open")
+                    while True:
+                        await asyncio.sleep(0.1)
+            except Exception as e:
+                print(f"[LITE] ❌ Mic stream lost: {e}; retrying")
+                self.ui.write_log("ERR: Laptop microphone unavailable — retrying.")
+                await asyncio.sleep(1)
 
     async def _receive_audio(self):
         print("[LITE] 👂 Recv started")
@@ -1783,8 +1796,11 @@ class LiteLive:
 
     async def _play_audio(self):
         print("[LITE] 🔊 Play started")
+        output_device = resolve_output_device(RECEIVE_SAMPLE_RATE)
+        print(f"[LITE] 🔊 Output device: {output_device_name(output_device)}")
 
         stream = sd.RawOutputStream(
+            device=output_device,
             samplerate=RECEIVE_SAMPLE_RATE,
             channels=CHANNELS,
             dtype="int16",

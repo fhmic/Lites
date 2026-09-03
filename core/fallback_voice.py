@@ -29,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
+from core.audio_devices import input_device_name, resolve_input_device
 
 
 def _get_base_dir() -> Path:
@@ -88,7 +89,10 @@ def record_utterance(is_muted=None) -> np.ndarray | None:
             q.append(indata.copy())
 
     start = time.time()
+    input_device = resolve_input_device(SAMPLE_RATE)
+    print(f"[LITE] 🎤 Input device: {input_device_name(input_device)}")
     with sd.InputStream(
+        device=input_device,
         samplerate=SAMPLE_RATE, channels=CHANNELS,
         dtype="float32", blocksize=block_frames, callback=callback,
     ):
@@ -152,7 +156,10 @@ def wait_for_speech(should_stop: threading.Event, is_muted=None, max_wait_s: flo
             if rms > SILENCE_THRESHOLD:
                 detected.set()
 
+        input_device = resolve_input_device(SAMPLE_RATE)
+        print(f"[LITE] 🎤 Input device: {input_device_name(input_device)}")
         with sd.InputStream(
+            device=input_device,
             samplerate=SAMPLE_RATE, channels=CHANNELS,
             dtype="float32", blocksize=block_frames, callback=callback,
         ):

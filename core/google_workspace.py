@@ -34,7 +34,6 @@ refresh token in config/google_token.json (also gitignored) keeps it
 signed in without asking again unless you revoke access.
 """
 import base64
-import html
 import sys
 import threading
 from email.mime.text import MIMEText
@@ -171,21 +170,8 @@ def _extract_plain_text(payload: dict) -> str:
     return ""
 
 
-def _display_name(from_header: str) -> str:
-    """'National Institute of Credit... <membershipabuja@icanigeria.net>' ->
-    'National Institute of Credit...' — for UI display only. The full
-    from_header (name + address) is what actually gets used for replies;
-    this never replaces it, only sits alongside it as from_display."""
-    if "<" in from_header:
-        name = from_header.split("<")[0].strip().strip('"')
-        return name or from_header.split("<")[1].rstrip(">").strip()
-    return from_header.strip()
-
-
 def list_recent_emails(max_results: int = 15, unread_only: bool = True) -> list[dict]:
-    """Returns [{id, thread_id, from, from_display, subject, date, snippet}, ...],
-    newest first. 'from' is the raw header (needed for replies); 'from_display'
-    is the sender name only, for showing on screen."""
+    """Returns [{id, thread_id, from, subject, date, snippet}, ...], newest first."""
     q = "is:unread in:inbox -category:promotions -category:social" if unread_only else "in:inbox"
     svc = _gmail()
     resp = svc.users().messages().list(userId="me", q=q, maxResults=max_results).execute()
@@ -196,15 +182,13 @@ def list_recent_emails(max_results: int = 15, unread_only: bool = True) -> list[
             metadataHeaders=["From", "Subject", "Date"],
         ).execute()
         headers = msg.get("payload", {}).get("headers", [])
-        from_header = _header(headers, "From")
         out.append({
-            "id":           msg["id"],
-            "thread_id":    msg["threadId"],
-            "from":         from_header,
-            "from_display": _display_name(from_header),
-            "subject":      _header(headers, "Subject") or "(no subject)",
-            "date":         _header(headers, "Date"),
-            "snippet":      html.unescape(msg.get("snippet", "")),
+            "id":        msg["id"],
+            "thread_id": msg["threadId"],
+            "from":      _header(headers, "From"),
+            "subject":   _header(headers, "Subject") or "(no subject)",
+            "date":      _header(headers, "Date"),
+            "snippet":   msg.get("snippet", ""),
         })
     return out
 
