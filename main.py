@@ -92,6 +92,7 @@ from google import genai
 from google.genai import types
 from ui import LiteUI
 from core.audio_devices import (
+    input_channel_index,
     input_device_name,
     output_device_name,
     resample_audio,
@@ -1665,17 +1666,20 @@ class LiteLive:
             if status:
                 print(f"[LITE] ⚠️ Mic status: {status}")
             if not self.ui.muted and not self._phone_active:
-                data = resample_audio(indata[:, 0], input_rate, SEND_SAMPLE_RATE).tobytes()
+                data = resample_audio(
+                    indata[:, input_channel], input_rate, SEND_SAMPLE_RATE
+                ).tobytes()
                 loop.call_soon_threadsafe(enqueue_mic_audio, data)
 
         while True:
             try:
                 input_device, input_rate = resolve_input_stream(SEND_SAMPLE_RATE)
+                input_channel = input_channel_index(input_device)
                 print(f"[LITE] 🎤 Input device: {input_device_name(input_device)}")
                 with sd.InputStream(
                     device=input_device,
                     samplerate=input_rate,
-                    channels=CHANNELS,
+                    channels=max(CHANNELS, input_channel + 1),
                     dtype="int16",
                     blocksize=CHUNK_SIZE,
                     callback=callback,

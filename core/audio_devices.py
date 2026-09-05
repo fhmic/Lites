@@ -40,12 +40,25 @@ def resolve_input_stream(sample_rate: int = 16000) -> tuple[int, int]:
         "airpods",
         "buds",
     )
+    # Some Intel SST drivers expose a generic array endpoint that opens
+    # successfully but carries only a near-zero signal. Their dedicated DMIC
+    # endpoints contain the actual microphone channel.
+    dedicated_internal_terms = (
+        "microphone array 1",
+        "microphone array 2",
+        "microphone array 3",
+    )
     input_devices = [
         (index, device)
         for index, device in enumerate(devices)
         if device.get("max_input_channels", 0) > 0
     ]
     candidates = []
+    candidates.extend(
+        index for index, device in enumerate(devices)
+        if device.get("max_input_channels", 0) > 0
+        and any(term in device.get("name", "").lower() for term in dedicated_internal_terms)
+    )
     if (
         default_input is not None
         and default_input < len(devices)
@@ -115,6 +128,18 @@ def resolve_input_stream(sample_rate: int = 16000) -> tuple[int, int]:
     raise RuntimeError(
         f"No microphone supports {sample_rate} Hz. Available input devices: {details}"
     )
+
+
+def input_channel_index(device_index: int) -> int:
+    """Return the active channel for known multi-channel Intel DMIC endpoints."""
+    try:
+        device = sd.query_devices(device_index)
+        name = str(device.get("name", "")).lower()
+        if any(term in name for term in ("microphone array 1", "microphone array 2")):
+            return 1 if device.get("max_input_channels", 0) > 1 else 0
+    except Exception:
+        pass
+    return 0
 
 
 def resolve_output_device(sample_rate: int = 24000) -> int:
