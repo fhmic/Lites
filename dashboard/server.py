@@ -41,6 +41,25 @@ PORT        = 8000
 MAX_UPLOAD_MB = 500
 
 
+def _find_free_port(start_port: int, max_tries: int = 50) -> int:
+    """Return the first free TCP port starting at start_port.
+
+    Bind on 0.0.0.0 so the check uses the same wildcard address family as
+    uvicorn's host binding; this matches the real socket-conflict case seen on
+    Windows when 8000 is already occupied by another process.
+    """
+    for offset in range(max_tries):
+        port = start_port + offset
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("0.0.0.0", port))
+                return port
+            except OSError:
+                continue
+    raise OSError(f"No free port available starting from {start_port}")
+
+
 def _make_uploads_dir() -> Path:
     """Return (and create) the cross-platform uploads folder."""
     for candidate in [
@@ -370,6 +389,7 @@ class DashboardServer:
 
     def __init__(self):
         self._ip                          = _local_ip()
+        self._port                        = _find_free_port(PORT)
         self._tokens: set[str]            = set()
         self._token_keys: dict[str, str]  = {}   # auth_token → session_key
         self._aes_cache:  dict[str, bytes]= {}   # session_key → AES bytes
@@ -378,6 +398,7 @@ class DashboardServer:
         self._command_queue               = asyncio.Queue()
         self._wake_callback               = None
         self._connect_callback            = None
+        self._file_callback               = None
         self._pending_keys: dict[str, float] = {}
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
@@ -402,13 +423,13 @@ class DashboardServer:
 
     def get_url(self) -> str:
         proto = "https" if self._ssl_enabled() else "http"
-        return f"{proto}://{self._ip}:{PORT}"
+        return f"{proto}://{self._ip}:{self._port}"
 
     def get_manual_url(self) -> str:
         """URL for manual browser entry. When HTTPS active, points to alias port (also HTTPS)."""
         if self._ssl_enabled():
-            return f"{self._ip}:{PORT + 1}"
-        return f"{self._ip}:{PORT}"
+            return f"{self._ip}:{self._port + 1}"
+        return f"{self._ip}:{self._port}"
 
     def _aes_key(self, session_key: str) -> bytes:
         if session_key not in self._aes_cache:
@@ -431,6 +452,9 @@ class DashboardServer:
 
     def set_connect_callback(self, fn) -> None:
         self._connect_callback = fn
+
+    def set_file_callback(self, fn) -> None:
+        self._file_callback = fn
 
     # ── broadcast ────────────────────────────────────────────────────────
 
@@ -481,7 +505,7 @@ class DashboardServer:
             # don't send custom headers (location.href doesn't carry Authorization).
             html = (self._app_html
                     .replace("__IP__", self._ip)
-                    .replace("__PORT__", str(PORT)))
+                    .replace("__PORT__", str(self._port)))
             return HTMLResponse(html, headers=_NO_CACHE)
 
         @app.post("/login")
@@ -689,6 +713,11 @@ class DashboardServer:
                     "size": size,
                     "saved_to": str(self._uploads_dir),
                 }))
+                if self._file_callback:
+                    try:
+                        self._file_callback(str(dest))
+                    except Exception as exc:
+                        print(f"[Dashboard] File handoff failed: {exc}")
                 return JSONResponse({"ok": True, "name": dest.name, "size": size})
         else:
             @app.post("/api/upload")
@@ -759,17 +788,16 @@ class DashboardServer:
     # ── serve ─────────────────────────────────────────────────────────────
 
     async def _serve_alias(self) -> None:
-        """Second HTTPS server on PORT+1 sharing the same app and in-memory state.
-        Chrome HTTPS-upgrades any bare IP:PORT the user types, so this port also needs TLS.
-        User types IP:8001 → Chrome tries https → self-signed cert warning → accept once → done."""
+        """Second HTTPS server on the next free port sharing the same app/state."""
         ssl_key  = BASE_DIR / "config" / "certs" / "lite.key"
         ssl_cert = BASE_DIR / "config" / "certs" / "lite.crt"
-        asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, PORT + 1)
+        alias_port = _find_free_port(self._port + 1)
+        asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, alias_port)
         cfg = uvicorn.Config(
-            self.app, host="0.0.0.0", port=PORT + 1, log_level="warning",
+            self.app, host="0.0.0.0", port=alias_port, log_level="warning",
             ssl_keyfile=str(ssl_key), ssl_certfile=str(ssl_cert),
         )
-        print(f"[Dashboard] Manual entry:  {self._ip}:{PORT + 1}  (type in browser, accept cert once)")
+        print(f"[Dashboard] Manual entry:  {self._ip}:{alias_port}  (type in browser, accept cert once)")
         await uvicorn.Server(cfg).serve()
 
     async def serve(self) -> None:
@@ -780,7 +808,7 @@ class DashboardServer:
 
         # Firewall setup runs in a thread — uvicorn starts immediately,
         # no waiting for UAC dialogs or subprocess timeouts.
-        asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, PORT)
+        asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, self._port)
 
         use_ssl  = self._ssl_enabled()
         ssl_key  = BASE_DIR / "config" / "certs" / "lite.key"
@@ -790,11 +818,11 @@ class DashboardServer:
             asyncio.create_task(self._serve_alias())
 
         cfg = uvicorn.Config(
-            self.app, host="0.0.0.0", port=PORT, log_level="warning",
+            self.app, host="0.0.0.0", port=self._port, log_level="warning",
             **({"ssl_keyfile": str(ssl_key), "ssl_certfile": str(ssl_cert)} if use_ssl else {}),
         )
 
         proto = "https" if use_ssl else "http"
-        print(f"[Dashboard] {proto}://{self._ip}:{PORT}")
+        print(f"[Dashboard] {proto}://{self._ip}:{self._port}")
         print("[Dashboard] Press 'Remote Control' in LITE UI to get the QR code.")
         await uvicorn.Server(cfg).serve()

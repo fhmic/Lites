@@ -283,6 +283,7 @@ class HudWindow(QMainWindow):
         self._pending_js: list[str] = []   # queued pushes until the page/bridge is actually ready
 
         self.on_text_command   = None
+        self.on_file_uploaded  = None
         self.on_remote_clicked = None
         self.on_interrupt      = None
 
@@ -450,6 +451,11 @@ class HudWindow(QMainWindow):
             name = Path(path).name
             self._run_js(f"window.LiteHud && window.LiteHud.onFileSelected({json.dumps(name)})")
             self._log_sig.emit(f"SYS: File selected — {name}")
+            if self.on_file_uploaded:
+                try:
+                    self.on_file_uploaded(path)
+                except Exception as e:
+                    self._log_sig.emit(f"ERR: file upload handoff failed: {e}")
 
     def _on_setup_submitted(self, cfg_json: str):
         try:
@@ -730,6 +736,19 @@ class LiteUI:
         self._win.show()
         self.root = _RootShim(self._app)
 
+    def _safe_emit_pyqt_signal(self, signal_name: str, *args):
+        win = getattr(self, "_win", None)
+        if win is None:
+            return
+        try:
+            signal = getattr(win, signal_name)
+            signal.emit(*args)
+        except RuntimeError as exc:
+            msg = str(exc)
+            if "wrapped C/C++ object" in msg or "deleted" in msg or "has been deleted" in msg:
+                return
+            raise
+
     # ---------- mute ----------
     @property
     def muted(self) -> bool:
@@ -771,6 +790,14 @@ class LiteUI:
         self._win.on_text_command = cb
 
     @property
+    def on_file_uploaded(self):
+        return self._win.on_file_uploaded
+
+    @on_file_uploaded.setter
+    def on_file_uploaded(self, cb):
+        self._win.on_file_uploaded = cb
+
+    @property
     def on_remote_clicked(self):
         return self._win.on_remote_clicked
 
@@ -785,6 +812,14 @@ class LiteUI:
     @on_interrupt.setter
     def on_interrupt(self, cb):
         self._win.on_interrupt = cb
+
+    def set_current_file(self, path: str | None) -> None:
+        """Record a file uploaded outside the local Qt picker."""
+        self._win._current_file = str(path) if path else None
+        if path:
+            self._win._run_js(
+                f"window.LiteHud && window.LiteHud.onFileSelected({json.dumps(Path(path).name)})"
+            )
 
     def notify_phone_connected(self) -> None:
         self._win._toast_sig.emit("REMOTE", "Phone connected.")
@@ -813,10 +848,10 @@ class LiteUI:
 
     # ---------- core HUD ----------
     def set_state(self, state: str):
-        self._win._state_sig.emit(state)
+        self._safe_emit_pyqt_signal("_state_sig", state)
 
     def write_log(self, text: str):
-        self._win._log_sig.emit(text)
+        self._safe_emit_pyqt_signal("_log_sig", text)
 
     def wait_for_api_key(self):
         while not self._win._ready:

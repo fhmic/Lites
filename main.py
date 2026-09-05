@@ -91,14 +91,6 @@ import numpy as np
 from google import genai
 from google.genai import types
 from ui import LiteUI
-from core.audio_devices import (
-    input_device_name,
-    output_device_name,
-    resample_audio,
-    resolve_input_device,
-    resolve_input_stream,
-    resolve_output_device,
-)
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
@@ -1188,6 +1180,7 @@ class LiteLive:
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
         self._phone_stt           = None    # lazily-loaded WhisperSTT, shared across fallback-mode phone utterances
         self._pending_vision       = None    # (img_bytes, mime_type, question, angle) to inject after tool response
+        self._pending_file_notice  = None   # uploaded before a Live session is ready
         self._vision_cam_active    = False   # True if camera was opened for vision → auto-close after response
         self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
@@ -1204,6 +1197,7 @@ class LiteLive:
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
         self._authorized_language: str | None = None  # permanently None — language switching is disabled entirely (nothing sets this anymore); kept only because proactive.py's build_prompt() still takes it as a param
+        self.ui.on_file_uploaded = self._on_file_uploaded
 
     def _make_remote_key(self):
         """Called from Qt main thread when user presses Remote Control."""
@@ -1219,8 +1213,11 @@ class LiteLive:
         return url, key, f"{url}/auto-login?key={key}", manual
 
     def _on_text_command(self, text: str):
+        self._send_text_to_session(text)
+
+    def _send_text_to_session(self, text: str) -> bool:
         if not self._loop or not self.session:
-            return
+            return False
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"parts": [{"text": text}]},
@@ -1228,6 +1225,19 @@ class LiteLive:
             ),
             self._loop
         )
+        return True
+
+    def _on_file_uploaded(self, path: str):
+        """Make every upload source visible to the next file-processing turn."""
+        path = str(Path(path).expanduser().resolve())
+        self.ui.set_current_file(path)
+        notice = (
+            f"A file named {Path(path).name} has just been uploaded and is ready at "
+            f"{path}. Ask the user what they would like you to do with it. "
+            "Do not process it until they give an instruction."
+        )
+        if not self._send_text_to_session(notice):
+            self._pending_file_notice = notice
 
     def set_speaking(self, value: bool):
         with self._speaking_lock:
@@ -1617,6 +1627,20 @@ class LiteLive:
             response={"result": result}
         )
 
+    def _queue_live_audio(self, data: bytes):
+        """Keep the freshest mic frames; drop stale ones when the live queue is full."""
+        if self.out_queue is None:
+            return
+        item = {"data": data, "mime_type": INPUT_AUDIO_MIME}
+        try:
+            self.out_queue.put_nowait(item)
+        except asyncio.QueueFull:
+            try:
+                self.out_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            self.out_queue.put_nowait(item)
+
     async def _send_realtime(self):
         while True:
             msg = await self.out_queue.get()
@@ -1627,25 +1651,20 @@ class LiteLive:
         loop = asyncio.get_event_loop()
 
         def enqueue_mic_audio(data):
-            """Preserve every captured block until the live sender accepts it."""
-            if self.out_queue is None:
-                return
-            self.out_queue.put_nowait({"data": data, "mime_type": INPUT_AUDIO_MIME})
+            """Keep the freshest mic input and discard stale packets when the queue is full."""
+            self._queue_live_audio(data)
 
         def callback(indata, frames, time_info, status):
             if status:
                 print(f"[LITE] ⚠️ Mic status: {status}")
             if not self.ui.muted and not self._phone_active:
-                data = resample_audio(indata[:, 0], input_rate, SEND_SAMPLE_RATE).tobytes()
+                data = indata[:, 0].tobytes()
                 loop.call_soon_threadsafe(enqueue_mic_audio, data)
 
         while True:
             try:
-                input_device, input_rate = resolve_input_stream(SEND_SAMPLE_RATE)
-                print(f"[LITE] 🎤 Input device: {input_device_name(input_device)}")
                 with sd.InputStream(
-                    device=input_device,
-                    samplerate=input_rate,
+                    samplerate=SEND_SAMPLE_RATE,
                     channels=CHANNELS,
                     dtype="int16",
                     blocksize=CHUNK_SIZE,
@@ -1678,7 +1697,15 @@ class LiteLive:
                             _audio_data = response.data
                             _SLICE = 2400
                             for _i in range(0, len(_audio_data), _SLICE):
-                                self.audio_in_queue.put_nowait(_audio_data[_i : _i + _SLICE])
+                                chunk = _audio_data[_i : _i + _SLICE]
+                                try:
+                                    self.audio_in_queue.put_nowait(chunk)
+                                except asyncio.QueueFull:
+                                    try:
+                                        self.audio_in_queue.get_nowait()
+                                    except asyncio.QueueEmpty:
+                                        pass
+                                    self.audio_in_queue.put_nowait(chunk)
 
                     if response.server_content:
                         sc = response.server_content
@@ -1802,11 +1829,7 @@ class LiteLive:
 
     async def _play_audio(self):
         print("[LITE] 🔊 Play started")
-        output_device = resolve_output_device(RECEIVE_SAMPLE_RATE)
-        print(f"[LITE] 🔊 Output device: {output_device_name(output_device)}")
-
         stream = sd.RawOutputStream(
-            device=output_device,
             samplerate=RECEIVE_SAMPLE_RATE,
             channels=CHANNELS,
             dtype="int16",
@@ -2394,6 +2417,7 @@ class LiteLive:
             from dashboard.server import DashboardServer
             self._dashboard = DashboardServer()
             self._dashboard.set_connect_callback(self._on_phone_connected)
+            self._dashboard.set_file_callback(self._on_file_uploaded)
             asyncio.create_task(self._dashboard.serve())
             # Both run for the whole app lifetime, not just inside an active
             # Gemini Live session — _relay_phone_audio used to only exist
@@ -2494,12 +2518,11 @@ class LiteLive:
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session          = session
-                    self.audio_in_queue   = asyncio.Queue()
-                    # Audio must not be dropped during a short network/API stall;
-                    # dropping old chunks truncates voice commands.
-                    # Keep live audio low-latency. An unbounded queue can preserve
-                    # stale speech for minutes when the network briefly stalls,
-                    # making the next command appear to be heard intermittently.
+                    # Keep buffered audio bounded so stale speech does not pile up and
+                    # cause the next command to sound intermittent while the network
+                    # catches up. The fresh mic data is always kept; older chunks are
+                    # discarded when the queue fills.
+                    self.audio_in_queue   = asyncio.Queue(maxsize=200)
                     self.out_queue        = asyncio.Queue(maxsize=50)
                     self._turn_done_event = asyncio.Event()
 
@@ -2510,6 +2533,10 @@ class LiteLive:
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
+
+                    if self._pending_file_notice:
+                        self._send_text_to_session(self._pending_file_notice)
+                        self._pending_file_notice = None
 
                     print("[LITE] Connected.")
                     _stop_fallback_voice()
