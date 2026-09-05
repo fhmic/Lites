@@ -91,6 +91,13 @@ import numpy as np
 from google import genai
 from google.genai import types
 from ui import LiteUI
+from core.audio_devices import (
+    input_device_name,
+    output_device_name,
+    resample_audio,
+    resolve_input_stream,
+    resolve_output_device,
+)
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
@@ -1658,13 +1665,16 @@ class LiteLive:
             if status:
                 print(f"[LITE] ⚠️ Mic status: {status}")
             if not self.ui.muted and not self._phone_active:
-                data = indata[:, 0].tobytes()
+                data = resample_audio(indata[:, 0], input_rate, SEND_SAMPLE_RATE).tobytes()
                 loop.call_soon_threadsafe(enqueue_mic_audio, data)
 
         while True:
             try:
+                input_device, input_rate = resolve_input_stream(SEND_SAMPLE_RATE)
+                print(f"[LITE] 🎤 Input device: {input_device_name(input_device)}")
                 with sd.InputStream(
-                    samplerate=SEND_SAMPLE_RATE,
+                    device=input_device,
+                    samplerate=input_rate,
                     channels=CHANNELS,
                     dtype="int16",
                     blocksize=CHUNK_SIZE,
@@ -1829,7 +1839,11 @@ class LiteLive:
 
     async def _play_audio(self):
         print("[LITE] 🔊 Play started")
+        output_device = resolve_output_device(RECEIVE_SAMPLE_RATE)
+        print(f"[LITE] 🔊 Output device: {output_device_name(output_device)}")
+
         stream = sd.RawOutputStream(
+            device=output_device,
             samplerate=RECEIVE_SAMPLE_RATE,
             channels=CHANNELS,
             dtype="int16",
