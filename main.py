@@ -363,29 +363,30 @@ TOOL_DECLARATIONS = [
     {
         "name": "ui_control",
         "description": (
-            "Operates LITE's OWN interface directly — scrolling the content panel, zooming "
-            "the whole HUD in/out, clicking LITE's own known controls (mute, interrupt, "
-            "settings, the executive directory, and the content panel's prev/next/minimize/"
-            "close — 'next'/'previous' are the button at the top-right corner of the content "
-            "panel for switching between what's been shown), and controlling whatever audio "
-            "or video is currently displayed (a GAS draft's narration, a video preview) with "
-            "play/pause/stop/restart. For 'click' targets NOT in that known list, it falls "
-            "back to matching whatever's actually rendered in the content panel right now — "
-            "a specific button on a displayed draft card, a link in a shown document, etc. — "
-            "and honestly reports if nothing matched, so always relay that back rather than "
+            "Operates LITE's OWN interface directly — scrolling the content panel in any "
+            "direction (up/down/left/right), zooming the whole HUD in/out, clicking LITE's "
+            "own known controls (mute, interrupt, settings, the executive directory, and the "
+            "content panel's prev/next/minimize/close — 'next'/'previous' are the button at "
+            "the top-right corner of the content panel for switching between what's been "
+            "shown), and controlling whatever audio or video is currently displayed (a GAS "
+            "draft's narration, a video preview) with play/pause/stop/restart. For 'click' "
+            "targets NOT in that known list, it searches every currently-relevant panel — the "
+            "content panel, the setup panel's sub-menus and toggles (including the fullscreen "
+            "toggle), and the executive directory — for a text/description match, and "
+            "honestly reports if nothing matched, so always relay that back rather than "
             "assuming success. This is NOT for web pages or other apps — that's "
             "browser_control (real websites) or computer_settings' screen_click (any other "
             "app/window on screen). Use this whenever the user wants LITE to interact with "
-            "its own HUD or with something it's currently showing on screen."
+            "its own HUD, its setup panel, or something it's currently showing on screen."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "action":      {"type": "STRING", "description": "scroll | zoom | click | media"},
-                "direction":   {"type": "STRING", "description": "For scroll: up | down (default down)."},
+                "direction":   {"type": "STRING", "description": "For scroll: up | down | left | right (default down)."},
                 "amount":      {"type": "INTEGER", "description": "For scroll: pixels to scroll (default 400)."},
                 "zoom_action": {"type": "STRING", "description": "For zoom: in | out | reset."},
-                "target":      {"type": "STRING", "description": "For click: mute | interrupt | settings | directory | close directory | next | previous | minimize | close panel, OR a description of anything else currently visible in the content panel to click."},
+                "target":      {"type": "STRING", "description": "For click: mute | interrupt | settings | directory | close directory | next | previous | minimize | close panel, OR a description of anything else currently visible (including setup sub-menu items and toggles like 'fullscreen') to click."},
                 "media_action": {"type": "STRING", "description": "For media: play | pause | stop | restart."},
             },
             "required": ["action"]
@@ -489,13 +490,6 @@ TOOL_DECLARATIONS = [
             "scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page, "
             "and conservative process cleanup to free memory. Cleanup only closes approved "
             "user applications after the user confirms a named process. "
-            "IMPORTANT — action='screen_click' (params: description) finds and clicks ANY "
-            "visible UI element anywhere on screen, in ANY app or window, by describing it in "
-            "plain language (a screenshot + vision model locates it) — this is how to click a "
-            "button, link, or icon inside a native app or a window that isn't LITE's own "
-            "interface or a browser page (browser pages have their own, more reliable "
-            "browser_control tool — prefer that for actual web pages). action='screen_find' "
-            "does the same lookup without clicking, if just the coordinates are needed. "
             "Use for ANY single computer control command."
         ),
         "parameters": {

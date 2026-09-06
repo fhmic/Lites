@@ -273,8 +273,6 @@ class HudWindow(QMainWindow):
 
         self._lite_ref = None  # set post-construction via set_live_session(); lets
                                 # closeEvent trigger a graceful session-save on window close
-        self._js_result_events = {}   # request_id -> threading.Event, for run_js_and_wait()
-        self._js_results       = {}   # request_id -> value returned by the JS side
 
         self._bridge  = Bridge()
         self._channel = QWebChannel()
@@ -336,6 +334,8 @@ class HudWindow(QMainWindow):
         self._bridge.hudReady.connect(self._on_hud_ready)
 
         self._zoom_level = 1.0
+        self._js_result_events = {}   # request_id -> threading.Event, for run_js_and_wait()
+        self._js_results       = {}   # request_id -> value returned by the JS side
         self._view.load(QUrl(self._http_server.url("index.html")))
 
     # ---------- JS push plumbing ----------
@@ -365,8 +365,6 @@ class HudWindow(QMainWindow):
                 ev.set()
 
         if not self._hud_ready:
-            # Nothing to run against yet — unblock the waiting caller with no
-            # result rather than leaving it to hang until the timeout.
             ev = self._js_result_events.get(request_id)
             if ev:
                 ev.set()
@@ -886,14 +884,14 @@ class LiteUI:
     # ---------- self-interface control (scroll/zoom/click/media on LITE's own HUD) ----------
     # Two tiers: a curated whitelist for LITE's own chrome (mute, directory,
     # content-panel nav — always reliable, fire-and-forget), and a fuzzy
-    # description-based fallback that reaches into whatever's actually
-    # displayed right now (a GAS draft card's approve button, a link inside
-    # a shown document, etc.) — which genuinely can fail to match, so it
-    # goes through run_js_and_wait and reports honestly either way.
-    # Free-form clicking on other apps/websites belongs to
-    # actions/computer_control.py's screen_click (vision-based, any app) and
-    # actions/browser_control.py's smart_click (real websites) respectively —
-    # this is specifically LITE's own interface and whatever it's showing.
+    # description-based fallback that searches every currently-relevant
+    # panel — the content panel AND the setup modal AND the executive
+    # directory, not just one of them, since whichever is actually open
+    # when the user asks to click something varies. Free-form clicking on
+    # other apps/websites belongs to actions/computer_control.py's
+    # screen_click (vision-based, any app) and actions/browser_control.py's
+    # smart_click (real websites) — this is specifically LITE's own
+    # interface and whatever it's showing.
     _UI_CLICK_TARGETS = {
         "mute":            "muteBtn",
         "interrupt":       "interruptBtn",
@@ -914,10 +912,10 @@ class LiteUI:
     def ui_click(self, target: str) -> str:
         """Thread-safe: clicks a known control in LITE's own chrome if the
         target matches the whitelist; otherwise falls back to a fuzzy
-        text/attribute match against whatever's actually displayed in the
-        content panel right now (a draft card's button, a link, etc.),
-        via smartClickContent on the JS side — and reports honestly if
-        nothing matched, rather than assuming."""
+        text/attribute match against every currently-relevant panel — the
+        content panel, the setup modal (sub-menu buttons, toggles like
+        fullscreen), and the executive directory — via smartClickContent on
+        the JS side, and reports honestly if nothing matched anywhere."""
         key = (target or "").strip().lower()
         dom_id = self._UI_CLICK_TARGETS.get(key)
         if dom_id:
@@ -944,15 +942,26 @@ class LiteUI:
 
     def ui_scroll(self, direction: str = "down", amount: int = 400) -> str:
         """Thread-safe: scrolls the content panel's body (where a long email,
-        document, or table is currently being shown) — not the whole page,
-        which has no natural scroll of its own since every HUD panel is
-        fixed-position."""
-        delta = -abs(amount) if (direction or "").strip().lower() in ("up", "back") else abs(amount)
+        document, or table is currently being shown) in any of the four
+        directions — not the whole page, which has no natural scroll of its
+        own since every HUD panel is fixed-position."""
+        d = (direction or "").strip().lower()
+        top = left = 0
+        if d in ("up", "back"):
+            top = -abs(amount)
+        elif d in ("down", "forward"):
+            top = abs(amount)
+        elif d == "left":
+            left = -abs(amount)
+        elif d == "right":
+            left = abs(amount)
+        else:
+            return f"'{direction}' isn't a scroll direction I recognize — use up, down, left, or right."
         self._win._run_js(
             f"(function(){{var b=document.getElementById('contentBody'); "
-            f"if(b) b.scrollBy({{top:{delta}, behavior:'smooth'}});}})()"
+            f"if(b) b.scrollBy({{top:{top}, left:{left}, behavior:'smooth'}});}})()"
         )
-        return f"Scrolled {'up' if delta < 0 else 'down'}."
+        return f"Scrolled {d}."
 
     def ui_zoom(self, action: str = "in") -> str:
         """Thread-safe: zooms LITE's own interface in/out/to default, via

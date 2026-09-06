@@ -2190,33 +2190,42 @@ function initBridge(){
         if (visible) directoryModal.classList.add('visible');
         else directoryModal.classList.remove('visible');
       },
-      // Fuzzy match against whatever's actually rendered in the content
-      // panel right now (a GAS draft card's approve/reject button, a link,
-      // a slide-nav arrow, etc.) — not LITE's own fixed chrome, that's the
-      // Python-side whitelist in ui.py's ui_click. Word-overlap scoring
-      // against each candidate's visible text + common attributes; picks
-      // the best match above zero, or reports nothing found.
+      // Fuzzy match against whatever's actually rendered right now — the
+      // content panel, the setup modal (sub-menu buttons, toggles like
+      // fullscreen — these live in #setupModal, NOT #contentBody, so both
+      // have to be searched), and the executive directory. Word-overlap
+      // scoring against each candidate's visible text + common attributes;
+      // picks the best match above zero across ALL scopes combined, or
+      // reports nothing found.
       smartClickContent: (description) => {
-        const body = document.getElementById('contentBody');
-        if (!body) return {ok:false, reason:'no content panel'};
         const q = String(description || '').toLowerCase().trim();
         if (!q) return {ok:false, reason:'empty description'};
         const words = q.split(/\s+/).filter(Boolean);
-        const candidates = Array.from(body.querySelectorAll(
-          'button, a, [data-act], .cp-btn, input[type="button"], input[type="submit"], [role="button"]'
-        ));
+
+        const scopes = ['contentBody', 'setupModal', 'directoryModal']
+          .map(id => document.getElementById(id))
+          .filter(Boolean);
+        if (!scopes.length) return {ok:false, reason:'no active panel'};
+
         let best = null, bestScore = 0;
-        for (const el of candidates) {
-          const sig = [
-            el.textContent, el.getAttribute('title'), el.getAttribute('aria-label'),
-            el.getAttribute('data-act'), el.getAttribute('placeholder'),
-          ].filter(Boolean).join(' ').toLowerCase();
-          let score = 0;
-          for (const w of words) if (sig.includes(w)) score++;
-          if (score > bestScore) { bestScore = score; best = el; }
+        for (const scope of scopes) {
+          const candidates = Array.from(scope.querySelectorAll(
+            'button, a, [data-act], .cp-btn, .menu-btn, .toggle-btn, .setup-back, '
+            + 'input[type="button"], input[type="submit"], input[type="checkbox"], '
+            + 'select, [role="button"]'
+          ));
+          for (const el of candidates) {
+            const sig = [
+              el.textContent, el.getAttribute('title'), el.getAttribute('aria-label'),
+              el.getAttribute('data-act'), el.getAttribute('data-page'), el.getAttribute('placeholder'),
+            ].filter(Boolean).join(' ').toLowerCase();
+            let score = 0;
+            for (const w of words) if (sig.includes(w)) score++;
+            if (score > bestScore) { bestScore = score; best = el; }
+          }
         }
         if (best && bestScore > 0) {
-          const label = (best.textContent || best.getAttribute('data-act') || '').trim().slice(0, 60);
+          const label = (best.textContent || best.getAttribute('data-act') || best.getAttribute('data-page') || '').trim().slice(0, 60);
           best.click();
           return {ok:true, matched: label};
         }

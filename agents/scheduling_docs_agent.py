@@ -217,11 +217,14 @@ def _do_check_inbox(p: dict, player=None, speak=None) -> str:
 
     if player is not None and hasattr(player, "show_content"):
         try:
-            columns = ["From", "Subject", "Preview"]
-            rows = [[(e.get("from_display") or e.get("from", ""))[:40], e["subject"][:70], e["snippet"][:90]] for e in emails]
+            columns = ["ID", "From", "Subject", "Preview"]
+            rows = [
+                [e["id"], (e.get("from_display") or e.get("from", ""))[:40], e["subject"][:60], e["snippet"][:70]]
+                for e in emails
+            ]
             player.show_content(
                 f"INBOX — {len(emails)} unread",
-                "\n".join(f"• {e.get('from_display') or e.get('from', '')} — \"{e['subject']}\"" for e in emails),
+                "\n".join(f"• [{e['id']}] {e.get('from_display') or e.get('from', '')} — \"{e['subject']}\"" for e in emails),
                 kind="table",
                 payload={"columns": columns, "rows": rows},
             )
@@ -229,8 +232,8 @@ def _do_check_inbox(p: dict, player=None, speak=None) -> str:
             pass
 
     return (
-        f"{len(emails)} unread — showing them on screen. Tell me which one "
-        f"(by sender or subject) if you'd like a reply drafted."
+        f"{len(emails)} unread — showing them on screen with their IDs. Tell me which one "
+        f"(by id, sender, or subject) if you'd like it read or a reply drafted."
     )
 
 
