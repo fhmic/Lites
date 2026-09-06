@@ -28,12 +28,15 @@ the safety net around that session, not the coding itself:
   6. Fallback    — if the primary executor fails at the *infrastructure*
                    layer (CLI not on PATH, hits the timeout, exits with a
                    non-zero code, or returns an auth/credential error),
-                   hand the same task to the FCC Cline adapter and re-run
-                   the verify+commit pass on whatever Cline produces.
-                   Result-state failures (no edits made, files don't
-                   compile, git commit itself fails) are NOT Cline
-                   candidates — re-running with a different model would
-                   just reproduce them.
+                   hand the same task to the Cline VS Code extension
+                   running headless and re-run the verify+commit pass on
+                   whatever Cline produces. If the Cline extension isn't
+                   available, fall through to the FCC Cline adapter for
+                   users without the extension installed. Result-state
+                   failures (no edits made, files don't compile, git
+                   commit itself fails) are NOT Cline candidates —
+                   re-running with a different model would just reproduce
+                   them.
 
 Safety model:
 - scope="self" (default) always targets LITE's own install directory
@@ -53,6 +56,10 @@ Requires on the machine running LITE:
     http://127.0.0.1:8082), with the `claude` CLI already pointed at it
     (ANTHROPIC_BASE_URL / auth token) — that setup lives outside LITE
     entirely, this tool just shells out to whatever `claude` already does.
+  - for fallback only: the Cline VS Code extension installed and
+    authenticated, or the FCC Cline adapter at
+    %USERPROFILE%\.local\bin\fcc-cline.exe (overridable via the
+    `cline_adapter_path` config key or CLINE_ADAPTER_PATH env var).
   - the FCC Cline adapter at the configured path (default
     `~/.local/bin/fcc-cline.exe`) to enable the Cline fallback. If the
     adapter isn't there, the fallback is silently skipped and the user is
@@ -196,8 +203,117 @@ def _cline_adapter_path(cfg: dict) -> Path:
     return Path(configured).expanduser() if configured else DEFAULT_CLINE_ADAPTER
 
 
+# Cline VS Code extension — the user asked for Cline in VS Code to be the
+# fallback when the default configuration fails. When the extension is
+# installed in VS Code and the `cline` CLI is on PATH, we invoke it in
+# headless/print mode with the same prompt we gave Claude Code. If neither
+# is available, we fall through to the FCC Cline adapter below so the
+# fallback still works for users without the VS Code extension.
+DEFAULT_CLINE_VSCODE_BIN  = "cline.cmd" if os.name == "nt" else "cline"
+DEFAULT_CLINE_VSCODE_TPL  = [
+    DEFAULT_CLINE_VSCODE_BIN, "-p", "{prompt}", "--no-session", "--auto-approve",
+]
+
+
+def _cline_vscode_enabled(cfg: dict) -> bool:
+    """True when the Cline-in-VS-Code fallback should be attempted.
+
+    Disabled via cline_disable_vscode=true or the CLINE_DISABLE_VSCODE env
+    var. On by default — if `cline` is on PATH, we'll use it; if not, the
+    code falls through to the FCC adapter.
+    """
+    if os.environ.get("CLINE_DISABLE_VSCODE", "").lower() in ("1", "true", "yes"):
+        return False
+    return not cfg.get("cline_disable_vscode", False)
+
+
+def _cline_vscode_command(cfg: dict) -> list | None:
+    """Return the headless Cline command template, or None if the CLI
+    isn't available. Resolution order:
+      1. cline_vscode_command in config (list, "{prompt}" placeholder).
+      2. CLINE_VSCODE_CMD env var (list form via ';'-separated string).
+      3. DEFAULT_CLINE_VSCODE_TPL.
+    Returns None only when none of the above resolves to an executable
+    `cline` binary on PATH (or .cmd/.bat on Windows).
+    """
+    tpl = cfg.get("cline_vscode_command")
+    if not tpl:
+        env = os.environ.get("CLINE_VSCODE_CMD")
+        if env:
+            tpl = [s.strip() for s in env.split(";") if s.strip()]
+    if not tpl:
+        tpl = list(DEFAULT_CLINE_VSCODE_TPL)
+
+    if not tpl:
+        return None
+    first = tpl[0]
+    if Path(first).exists():
+        return tpl
+    if shutil.which(first) is not None:
+        return tpl
+    return None
+
+
+def _cline_vscode_env(cfg: dict) -> dict:
+    """Env for the Cline VS Code headless run. Mirrors _extra_env plus
+    Cline-specific keys so the extension's model route can also be
+    pointed at fcc-claude.
+    """
+    env = {**os.environ, **_extra_env(cfg)}
+    if cfg.get("cline_api_key"):
+        env["CLINE_API_KEY"] = cfg["cline_api_key"]
+    if cfg.get("cline_base_url"):
+        env["CLINE_BASE_URL"] = cfg["cline_base_url"]
+    return env
+
+
+def _run_cline_vscode_fallback(cfg: dict, work_dir: Path, task: str, timeout: int) -> str:
+    """Run the Cline VS Code extension in headless mode. Returns the
+    CLI's combined stdout/stderr. Caller is responsible for verifying
+    whatever the Cline run produced (same pipeline as Claude Code)."""
+    tpl = _cline_vscode_command(cfg)
+    if not tpl:
+        return "Cline VS Code extension not on PATH (install the Cline extension in VS Code, or set cline_vscode_command in config)."
+
+    prompt = (
+        f"You are working inside the project at {work_dir}. Complete the "
+        f"following task, making whatever file changes are needed. Verify "
+        f"your own work (run/compile/test as appropriate) before finishing. "
+        f"Task:\n\n{task}"
+    )
+    cmd = [part.format(prompt=prompt) if isinstance(part, str) else part for part in tpl]
+    env = _cline_vscode_env(cfg)
+    try:
+        result = subprocess.run(
+            cmd, cwd=str(work_dir), env=env,
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        return ((e.stdout or "") if isinstance(e.stdout, str) else "") + \
+               ((e.stderr or "") if isinstance(e.stderr, str) else "") + \
+               f"\n[Cline VS Code fallback timed out after {timeout}s]"
+    except FileNotFoundError:
+        return f"Cline VS Code fallback failed: `{tpl[0]}` not on PATH."
+    except Exception as e:
+        return f"Cline VS Code fallback failed to start: {e}"
+    out = (result.stdout or "") + (("\n" + result.stderr) if result.stderr else "")
+    return out.strip() or f"Cline VS Code fallback exited with code {result.returncode}."
+
+
 def _run_cline_fallback(cfg: dict, work_dir: Path, task: str, timeout: int) -> str:
-    """Run FCC's Cline adapter after Claude Code rejects its startup payload."""
+    """Run Cline after Claude Code fails at the infrastructure layer.
+
+    Resolution order (per the user's request to prefer Cline in VS Code):
+      1. Cline VS Code extension (headless) if enabled and on PATH.
+      2. FCC Cline adapter at cline_adapter_path (legacy).
+    Either returns the captured CLI output (which _verify_and_commit will
+    then judge) or a human-readable 'unavailable' message.
+    """
+    if _cline_vscode_enabled(cfg):
+        tpl = _cline_vscode_command(cfg)
+        if tpl is not None:
+            return _run_cline_vscode_fallback(cfg, work_dir, task, timeout)
+
     adapter = _cline_adapter_path(cfg)
     if not adapter.exists():
         return f"Cline fallback unavailable: {adapter} was not found."
@@ -704,23 +820,33 @@ def _maybe_fallback_to_cline(
     if kind not in _FAIL_HARD:
         return report(primary_message)
 
-    adapter = _cline_adapter_path(cfg)
-    if not adapter.exists():
+    # Cline can be reached two ways:
+    #   1. The Cline VS Code extension's headless `cline` CLI on PATH
+    #      (what the user asked for in their message).
+    #   2. The legacy FCC Cline adapter at cline_adapter_path.
+    # If either is available, _run_cline_fallback will pick the VS Code
+    # one first. Only when *neither* resolves do we tell the user the
+    # fallback isn't configured — and the message points at the VS Code
+    # extension install path first, since that's the preferred one.
+    vscode_tpl = _cline_vscode_command(cfg) if _cline_vscode_enabled(cfg) else None
+    adapter    = _cline_adapter_path(cfg)
+    if vscode_tpl is None and not adapter.exists():
         log(
             f"Primary executor failed ({kind}); Cline fallback skipped — "
-            f"adapter not found at {adapter}. Set 'cline_adapter_path' in "
-            f"config/api_keys.json (or CLINE_ADAPTER_PATH env var) to enable it."
+            f"no Cline CLI on PATH and no FCC adapter at {adapter}."
         )
         return report(
             f"{primary_message}\n\n"
-            f"[Cline fallback not configured — set cline_adapter_path in "
-            f"config/api_keys.json, or install the FCC Cline adapter at "
-            f"{adapter}, to get a fallback when Claude Code can't run.]"
+            f"[Cline fallback not configured — install the Cline extension "
+            f"in VS Code so the `cline` CLI is on PATH, or set "
+            f"'cline_adapter_path' in config/api_keys.json to "
+            f"{adapter}.]"
         )
 
+    via = f"the Cline VS Code CLI ({vscode_tpl[0]})" if vscode_tpl is not None else f"the FCC Cline adapter at {adapter}"
     log(
         f"Primary executor failed ({kind}); delegating the same task to "
-        f"Cline at {adapter} for one attempt..."
+        f"Cline via {via} for one attempt..."
     )
     cline_output = _run_cline_fallback(cfg, work_dir, task, timeout)
     cline_elapsed = time.monotonic() - started
@@ -748,7 +874,7 @@ def _maybe_fallback_to_cline(
 
     if cline_kind == _FAILURE_OK:
         log("Cline fallback completed the task successfully.")
-        return report(f"[Cline fallback after {kind}]\n{cline_message}")
+        return report(f"[Cline fallback after {kind} via {via}]\n{cline_message}")
 
     log(f"Cline fallback also failed ({cline_kind}); reporting both attempts.")
     return report(
