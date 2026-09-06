@@ -25,6 +25,15 @@ the safety net around that session, not the coding itself:
                    that doesn't at least compile, full stop.
   5. Commit      — a verified-good change is committed on its own, so it's
                    never mixed with whatever Felix had pending before.
+  6. Fallback    — if the primary executor fails at the *infrastructure*
+                   layer (CLI not on PATH, hits the timeout, exits with a
+                   non-zero code, or returns an auth/credential error),
+                   hand the same task to the FCC Cline adapter and re-run
+                   the verify+commit pass on whatever Cline produces.
+                   Result-state failures (no edits made, files don't
+                   compile, git commit itself fails) are NOT Cline
+                   candidates — re-running with a different model would
+                   just reproduce them.
 
 Safety model:
 - scope="self" (default) always targets LITE's own install directory
@@ -44,6 +53,10 @@ Requires on the machine running LITE:
     http://127.0.0.1:8082), with the `claude` CLI already pointed at it
     (ANTHROPIC_BASE_URL / auth token) — that setup lives outside LITE
     entirely, this tool just shells out to whatever `claude` already does.
+  - the FCC Cline adapter at the configured path (default
+    `~/.local/bin/fcc-cline.exe`) to enable the Cline fallback. If the
+    adapter isn't there, the fallback is silently skipped and the user is
+    told how to enable it.
 
 NOTE on CLI flags: Claude Code's exact headless-mode flags can change
 between versions, and I can't verify Felix's installed version from here.
@@ -208,6 +221,192 @@ def _run_cline_fallback(cfg: dict, work_dir: Path, task: str, timeout: int) -> s
     return output.strip() or f"Cline fallback exited with code {result.returncode}."
 
 
+def _verify_and_commit(
+    work_dir, checkpoint, task, cli_output, elapsed, timed_out, scope, log, report,
+):
+    """Run the verify (py_compile) + commit pass and return a 4-tuple.
+
+    Returns
+    -------
+    (changed, broken, commit_failed, final_message):
+        changed         — list of .py files the session touched.
+        broken          — list of "<file>: <error>" for files that don't
+                          compile (post-rollback, may be empty).
+        commit_failed   — True when the changes compiled but the git
+                          commit itself didn't land.
+        final_message   — the user-facing message that *would* be reported
+                          for the primary agent, before the orchestrator
+                          decides whether to try the Cline fallback. Used
+                          in the final report either as the success line
+                          or as a quoted context line under the Cline run.
+    """
+    changed = _changed_py_files(work_dir, checkpoint)
+    status  = _git(["status", "--porcelain"], work_dir, check=False).stdout
+
+    note          = " (session hit the time limit — verify the result before relying on it)" if timed_out else ""
+    restart_note  = " Restart LITE for changes to its own code to take effect." if scope != "external" else ""
+    files_txt     = "\n".join(f"  • {f}" for f in changed) if changed else "  (no .py files — see git status)"
+
+    if not status.strip():
+        tail = "\n".join(cli_output.strip().splitlines()[-15:])
+        return (
+            [],
+            [],
+            False,
+            f"Claude Code ran ({elapsed:.0f}s) but left no changes.\n"
+            f"Last output:\n{tail}",
+        )
+
+    broken = []
+    for rel in changed:
+        full = work_dir / rel
+        if not full.exists():
+            continue
+        try:
+            py_compile.compile(str(full), doraise=True)
+        except Exception as e:
+            broken.append(f"{rel}: {e}")
+
+    if broken:
+        _rollback(work_dir, checkpoint, log)
+        return (
+            changed,
+            broken,
+            False,
+            "Claude Code's changes didn't compile — rolled back to the pre-run "
+            "checkpoint, nothing was left broken.\n"
+            + "\n".join(f"  • {b}" for b in broken),
+        )
+
+    # ── Commit the verified-good change ─────────────────────────────────────
+    _git(["add", "-A"], work_dir, check=False)
+    summary = task[:72] + ("..." if len(task) > 72 else "")
+    commit  = _git(["commit", "-m", f"feat(code_agent): {summary}"], work_dir, check=False)
+    still_dirty = _git(["status", "--porcelain"], work_dir, check=False).stdout.strip()
+
+    if still_dirty:
+        reason = (commit.stderr or commit.stdout or "unknown reason").strip().splitlines()[-1:] or ["unknown reason"]
+        return (
+            changed,
+            [],
+            True,
+            f"Done{note} in {elapsed:.0f}s. Changed:\n{files_txt}\n"
+            f"Verified compiling — but the commit itself failed ({reason[0]}). "
+            f"The change is on disk and staged, not committed — commit it "
+            f"manually once that's sorted.{restart_note}",
+        )
+
+    return (
+        changed,
+        [],
+        False,
+        f"Done{note} in {elapsed:.0f}s. Changed:\n{files_txt}\n"
+        f"Verified compiling and committed.{restart_note}",
+    )
+
+
+def _maybe_fallback_to_cline(
+    cfg, work_dir, task, timeout, log, report,
+    *, checkpoint, cli_output, kind, primary_message, scope, started,
+):
+    """Run Cline when the primary (Claude Code) run didn't produce a
+    verified + committed result. Returns the user-facing report string.
+
+    The Cline run uses the *same* checkpoint that the Claude Code run
+    started from, so a Cline success lands on a tree that already has
+    whatever the Claude Code session left behind (rolled back on a
+    compile failure, untouched otherwise). The same verify + commit
+    pass runs on Cline's output, so a Cline success commits on top of
+    the original worktree just like a Claude Code success would have.
+    """
+    adapter = _cline_adapter_path(cfg)
+    if not adapter.exists():
+        log(f"Cline fallback unavailable ({adapter} not found); returning the primary failure.")
+        return report(primary_message)
+
+    log(f"Primary run failed ({kind}); handing the task to the Cline fallback...")
+    cline_output = _run_cline_fallback(cfg, work_dir, task, timeout)
+    log(f"Cline fallback finished. Re-running verify + commit on its output...")
+
+    cline_elapsed = time.monotonic() - started
+    cline_changed, cline_broken, cline_commit_failed, cline_message = _verify_and_commit(
+        work_dir, checkpoint, task, cline_output, cline_elapsed,
+        timed_out=False, scope=scope, log=log, report=lambda _t: _t,
+    )
+
+    cline_kind = _detect_failure_kind(
+        cline_output,
+        changed_files=cline_changed,
+        broken_files=cline_broken,
+        commit_failed=cline_commit_failed,
+    )
+
+    if cline_kind == _FAILURE_OK:
+        return report(
+            f"Cline completed what Claude Code couldn't.\n"
+            f"Primary agent said: {primary_message}\n"
+            f"\nCline result:\n{cline_message}"
+        )
+
+    log("Cline fallback also did not produce a verified, committed change.")
+    return report(
+        f"Both agents failed to produce a verified change.\n"
+        f"\nPrimary agent ({kind}):\n{primary_message}\n"
+        f"\nCline fallback ({cline_kind}):\n{cline_message}\n"
+        f"\nLast 20 lines of Cline output:\n"
+        + "\n".join(cline_output.strip().splitlines()[-20:])
+    )
+
+
+# Failure kinds the orchestrator uses to decide whether to invoke the
+# Cline fallback. Kept as a small enum-style set of strings so the
+# detector and the trigger site stay trivially in sync.
+_FAILURE_OK              = "ok"               # verified + committed
+_FAILURE_PAYLOAD_TOO_BIG = "payload_too_big"  # FCC's 32 MB rejection
+_FAILURE_CLI_ERROR       = "cli_error"        # non-zero exit, FileNotFoundError, etc.
+_FAILURE_TIMEOUT         = "timeout"          # session hit the wall clock
+_FAILURE_EMPTY           = "empty"            # session ran but left no changes
+_FAILURE_COMPILE         = "compile_failed"   # changes broke py_compile
+_FAILURE_COMMIT          = "commit_failed"    # changes good, git commit itself failed
+_FAILURE_STARTUP         = "startup_failed"   # subprocess.run never produced a session
+
+
+def _detect_failure_kind(
+    cli_output: str,
+    *,
+    returncode: int | None = None,
+    timed_out: bool = False,
+    changed_files: list | None = None,
+    broken_files: list | None = None,
+    commit_failed: bool = False,
+) -> str:
+    """Classify a finished Claude Code session into a single failure kind.
+
+    The caller is the orchestrator just after the verify/commit pass; it
+    passes the original CLI output, the subprocess return code, and the
+    structural facts gathered by the verify pass (which files changed,
+    which of those don't compile, and whether the final commit itself
+    succeeded). Returns one of the ``_FAILURE_*`` constants above. The
+    orchestrator treats anything other than ``_FAILURE_OK`` as a reason
+    to consider the Cline fallback.
+    """
+    text = (cli_output or "").lower()
+
+    if "request too large" in text and "32mb" in text:
+        return _FAILURE_PAYLOAD_TOO_BIG
+    if timed_out:
+        return _FAILURE_TIMEOUT
+    if returncode not in (None, 0):
+        return _FAILURE_CLI_ERROR
+    if broken_files:
+        return _FAILURE_COMPILE
+    if commit_failed:
+        return _FAILURE_COMMIT
+    if not changed_files:
+        return _FAILURE_EMPTY
+    return _FAILURE_OK
+
+
 def _fcc_reachable(url: str) -> bool:
     try:
         import requests
@@ -324,17 +523,241 @@ def _changed_py_files(work_dir: Path, since: str) -> list:
     return sorted(files)
 
 
-def _changed_py_files(work_dir: Path, since: str) -> list:
-    diff = _git(["diff", "--name-only", since, "--", "*.py"], work_dir, check=False).stdout
-    untracked = _git(["ls-files", "--others", "--exclude-standard", "*.py"], work_dir, check=False).stdout
-    files = set(f for f in diff.splitlines() if f.strip()) | set(f for f in untracked.splitlines() if f.strip())
-    return sorted(files)
-
-
 def _rollback(work_dir: Path, checkpoint: str, log):
     log(f"Rolling back to checkpoint {checkpoint[:10]}...")
     _git(["reset", "--hard", checkpoint], work_dir, check=False)
     _git(["clean", "-fd"], work_dir, check=False)
+
+
+# ── Failure classification & Cline fallback policy ─────────────────────────
+# The primary executor is Claude Code via FCC. When the *infrastructure* of
+# that pipeline is the problem (the CLI isn't on PATH, it can't authenticate,
+# it crashes, it hangs past the timeout), we want a safety net so the user's
+# request is not silently dropped. Cline is that safety net: when present
+# and configured, it gets one attempt with the same task, same checkpoint
+# safety net, and same verify+commit pass. Result-state failures (no
+# changes, files don't compile, git commit itself failed) are NOT Cline
+# candidates — those are real outcomes, and re-running the same model
+# against the same project would just reproduce them.
+
+# Failure categories returned by _detect_failure_kind().
+_FAILURE_OK            = "ok"               # success
+_FAILURE_STARTUP       = "startup_failed"   # subprocess.run never produced a session
+_FAILURE_TIMEOUT       = "timeout"          # subprocess.run hit the timeout
+_FAILURE_EXIT_NONZERO  = "exit_nonzero"     # CLI returned a non-zero exit code
+_FAILURE_AUTH          = "auth_error"       # FCC/auth failure in stdout/stderr
+_FAIL_NO_CHANGES       = "no_changes"       # CLI succeeded but made no edits
+_FAILURE_BROKEN        = "broken_files"     # edits don't compile
+_FAILURE_COMMIT        = "commit_failed"    # edits good but git commit itself failed
+_FAIL_HARD = {                            # categories that warrant a Cline retry
+    _FAILURE_STARTUP,
+    _FAILURE_TIMEOUT,
+    _FAILURE_EXIT_NONZERO,
+    _FAILURE_AUTH,
+}
+
+
+# Strings that indicate an infrastructure-level auth/proxy failure in the
+# CLI's combined output, not a code problem in the project. Treated as
+# _FAILURE_AUTH so Cline gets a turn before we report back to the user.
+_AUTH_SIGNATURES = (
+    "401", "403", "unauthorized", "unauthenticated",
+    "api key", "apikey", "invalid token", "expired token",
+    "authentication failed", "auth failed",
+    "rate limit", "rate_limit", "quota exceeded",
+    "fcc server", "fcc rejected", "fcc-claude",
+    "billing", "payment required", "402",
+)
+
+
+def _detect_failure_kind(
+    cli_output: str,
+    returncode: int | None,
+    timed_out: bool,
+    changed_files: list,
+    broken_files: list,
+    commit_failed: bool,
+) -> str:
+    """Classify what happened so the orchestrator can pick the right next step.
+
+    Order matters: infrastructure-level failures (startup/timeout/non-zero
+    exit/auth) are reported BEFORE result-level failures (no changes,
+    broken files, commit failed), because if the CLI itself didn't run to
+    completion we don't know if a result would have been good.
+    """
+    if timed_out:
+        return _FAILURE_TIMEOUT
+    if returncode is not None and returncode != 0:
+        return _FAILURE_EXIT_NONZERO
+    out_lc = (cli_output or "").lower()
+    if any(sig in out_lc for sig in _AUTH_SIGNATURES):
+        return _FAILURE_AUTH
+    if commit_failed:
+        return _FAILURE_COMMIT
+    if broken_files:
+        return _FAILURE_BROKEN
+    if not changed_files:
+        return _FAIL_NO_CHANGES
+    return _FAILURE_OK
+
+
+def _verify_and_commit(
+    work_dir: Path,
+    checkpoint: str,
+    task: str,
+    cli_output: str,
+    elapsed: float,
+    timed_out: bool,
+    scope: str,
+    log,
+    report,
+) -> tuple[list, list, bool, str]:
+    """Run the post-run verify + commit pass. Pure function over the
+    working tree; returns the same shape the orchestrator unpacks:
+        (changed_py_files, broken_py_files, commit_failed, final_message)
+
+    This is the same logic the original orchestrator had inline; pulling
+    it out makes the orchestrator readable and lets _maybe_fallback_to_cline
+    re-use it after the Cline attempt.
+    """
+    changed = _changed_py_files(work_dir, checkpoint)
+    status  = _git(["status", "--porcelain"], work_dir, check=False).stdout
+
+    if not status.strip():
+        tail = "\n".join(cli_output.strip().splitlines()[-15:])
+        return changed, [], False, (
+            f"Claude Code ran ({elapsed:.0f}s) but left no changes.\n"
+            f"Last output:\n{tail}"
+        )
+
+    broken = []
+    for rel in changed:
+        full = work_dir / rel
+        if not full.exists():
+            continue
+        try:
+            py_compile.compile(str(full), doraise=True)
+        except Exception as e:
+            broken.append(f"{rel}: {e}")
+
+    if broken:
+        _rollback(work_dir, checkpoint, log)
+        return changed, broken, False, (
+            f"Claude Code's changes didn't compile — rolled back to the pre-run "
+            f"checkpoint, nothing was left broken.\n"
+            + "\n".join(f"  • {b}" for b in broken)
+        )
+
+    _git(["add", "-A"], work_dir, check=False)
+    summary = task[:72] + ("..." if len(task) > 72 else "")
+    commit = _git(
+        ["commit", "-m", f"feat(code_agent): {summary}"],
+        work_dir,
+        check=False,
+    )
+    still_dirty = _git(["status", "--porcelain"], work_dir, check=False).stdout
+
+    note = " (session hit the time limit — verify the result before relying on it)" if timed_out else ""
+    files_txt = (
+        "\n".join(f"  • {f}" for f in changed) if changed else "  (no .py files — see git status)"
+    )
+    restart_note = " Restart LITE for changes to its own code to take effect." if scope != "external" else ""
+
+    if still_dirty.strip():
+        reason = (commit.stderr or commit.stdout or "unknown reason").strip().splitlines()[-1:] or ["unknown reason"]
+        return changed, [], True, (
+            f"Done{note} in {elapsed:.0f}s. Changed:\n{files_txt}\n"
+            f"Verified compiling — but the commit itself failed ({reason[0]}). "
+            f"The change is on disk and staged, not committed — commit it "
+            f"manually once that's sorted.{restart_note}"
+        )
+
+    return changed, [], False, (
+        f"Done{note} in {elapsed:.0f}s. Changed:\n{files_txt}\n"
+        f"Verified compiling and committed.{restart_note}"
+    )
+
+
+def _maybe_fallback_to_cline(
+    cfg: dict,
+    work_dir: Path,
+    task: str,
+    timeout: int,
+    log,
+    report,
+    *,
+    checkpoint: str,
+    cli_output: str,
+    kind: str,
+    primary_message: str,
+    scope: str,
+    started: float,
+) -> str:
+    """Run Cline once when the primary executor failed at the infrastructure
+    layer. Returns the user-facing report — either the Cline result or the
+    original primary message + a 'Cline also tried' note.
+
+    Only fires for HARD failures (startup/timeout/non-zero exit/auth). Result
+    failures (no changes / broken / commit-failed) are real outcomes and
+    won't get better by re-running with a different model.
+    """
+    if kind not in _FAIL_HARD:
+        return report(primary_message)
+
+    adapter = _cline_adapter_path(cfg)
+    if not adapter.exists():
+        log(
+            f"Primary executor failed ({kind}); Cline fallback skipped — "
+            f"adapter not found at {adapter}. Set 'cline_adapter_path' in "
+            f"config/api_keys.json (or CLINE_ADAPTER_PATH env var) to enable it."
+        )
+        return report(
+            f"{primary_message}\n\n"
+            f"[Cline fallback not configured — set cline_adapter_path in "
+            f"config/api_keys.json, or install the FCC Cline adapter at "
+            f"{adapter}, to get a fallback when Claude Code can't run.]"
+        )
+
+    log(
+        f"Primary executor failed ({kind}); delegating the same task to "
+        f"Cline at {adapter} for one attempt..."
+    )
+    cline_output = _run_cline_fallback(cfg, work_dir, task, timeout)
+    cline_elapsed = time.monotonic() - started
+
+    # Same verify+commit pass as the primary executor — a Cline output is
+    # only useful if the resulting tree is good, just like Claude Code.
+    cline_changed, cline_broken, cline_commit_failed, cline_message = (
+        _verify_and_commit(
+            work_dir, checkpoint, task, cline_output, cline_elapsed,
+            timed_out=False, scope=scope, log=log, report=lambda t: t,
+        )
+    )
+
+    cline_kind = _detect_failure_kind(
+        cline_output,
+        returncode=None,           # _run_cline_fallback already returned
+                                   # its own human-readable summary, and
+                                   # the verify+commit outcome is what
+                                   # matters from here on.
+        timed_out=False,
+        changed_files=cline_changed,
+        broken_files=cline_broken,
+        commit_failed=cline_commit_failed,
+    )
+
+    if cline_kind == _FAILURE_OK:
+        log("Cline fallback completed the task successfully.")
+        return report(f"[Cline fallback after {kind}]\n{cline_message}")
+
+    log(f"Cline fallback also failed ({cline_kind}); reporting both attempts.")
+    return report(
+        f"[Cline fallback after {kind} also did not produce a verified result]\n\n"
+        f"Primary (Claude Code) result:\n{primary_message}\n\n"
+        f"Cline result:\n{cline_message}\n\n"
+        f"Last 20 lines of Cline output:\n"
+        + "\n".join(cline_output.strip().splitlines()[-20:])
+    )
 
 
 # ── Public entry point ───────────────────────────────────────────────────────
@@ -439,27 +862,38 @@ def code_agent(
     }
 
     started = time.monotonic()
+    returncode = 0
     try:
         proc = subprocess.run(
             cmd, cwd=str(work_dir), env=env,
             capture_output=True, text=True, timeout=timeout,
         )
         cli_output   = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
+        returncode   = proc.returncode
         timed_out    = False
     except subprocess.TimeoutExpired as e:
         cli_output = ((e.stdout or "") if isinstance(e.stdout, str) else "") + \
                      ((e.stderr or "") if isinstance(e.stderr, str) else "")
         timed_out  = True
+        returncode = 124   # conventional shell "timeout" code
         log(f"Claude Code session hit the {timeout}s timeout — stopping and verifying "
             f"whatever state it left behind.")
     except FileNotFoundError:
-        return report(f"Couldn't launch `{cli_name}` — is it installed and on PATH?")
+        # Don't bail out — Cline might still be available, and the user
+        # asked us to fall back to it when the default config fails.
+        cli_output   = f"FileNotFoundError: `{cli_name}` not on PATH"
+        returncode   = 127
+        timed_out    = False
     except Exception as e:
         return report(f"Failed to start the Claude Code session: {e}")
 
     # Older Claude Code builds can still attach their startup/session-title
     # payload despite the bounded command flags. Retry once with all optional
     # tools disabled; this is safe because no project mutation happened yet.
+    # Cline is invoked later (after the verify pass) by _maybe_fallback_to_cline
+    # for every failure kind, not just the 32 MB one — so this block is just
+    # an in-band retry that might let Claude Code succeed without burning the
+    # Cline turn at all.
     if "Request too large" in cli_output and "32MB" in cli_output:
         log("FCC rejected Claude's startup payload at 32 MB; retrying with minimal context...")
         minimal_cmd = [
@@ -475,61 +909,27 @@ def code_agent(
         except Exception as e:
             cli_output += f"\nMinimal FCC retry failed: {e}"
 
-    if "Request too large" in cli_output and "32MB" in cli_output:
-        log("Claude Code still exceeded FCC's limit; trying the Cline fallback...")
-        cli_output = f"{cli_output}\n[Cline fallback]\n{_run_cline_fallback(cfg, work_dir, task, timeout)}"
-
     elapsed = time.monotonic() - started
 
     # ── Verify ───────────────────────────────────────────────────────────────
-    changed = _changed_py_files(work_dir, checkpoint)
-    status  = _git(["status", "--porcelain"], work_dir, check=False).stdout
-
-    if not status.strip():
-        tail = "\n".join(cli_output.strip().splitlines()[-15:])
-        return report(
-            f"Claude Code ran ({elapsed:.0f}s) but left no changes.\n"
-            f"Last output:\n{tail}"
-        )
-
-    broken = []
-    for rel in changed:
-        full = work_dir / rel
-        if not full.exists():
-            continue
-        try:
-            py_compile.compile(str(full), doraise=True)
-        except Exception as e:
-            broken.append(f"{rel}: {e}")
-
-    if broken:
-        _rollback(work_dir, checkpoint, log)
-        return report(
-            f"Claude Code's changes didn't compile — rolled back to the pre-run "
-            f"checkpoint, nothing was left broken.\n"
-            + "\n".join(f"  • {b}" for b in broken)
-        )
-
-    # ── Commit the verified-good change ─────────────────────────────────────
-    _git(["add", "-A"], work_dir, check=False)
-    summary = task[:72] + ("..." if len(task) > 72 else "")
-    commit = _git(["commit", "-m", f"feat(code_agent): {summary}"], work_dir, check=False)
-    still_dirty = _git(["status", "--porcelain"], work_dir, check=False).stdout
-
-    note = " (session hit the time limit — verify the result before relying on it)" if timed_out else ""
-    files_txt = "\n".join(f"  • {f}" for f in changed) if changed else "  (no .py files — see git status)"
-    restart_note = " Restart LITE for changes to its own code to take effect." if scope != "external" else ""
-
-    if still_dirty.strip():
-        reason = (commit.stderr or commit.stdout or "unknown reason").strip().splitlines()[-1:] or ["unknown reason"]
-        return report(
-            f"Done{note} in {elapsed:.0f}s. Changed:\n{files_txt}\n"
-            f"Verified compiling — but the commit itself failed ({reason[0]}). "
-            f"The change is on disk and staged, not committed — commit it "
-            f"manually once that's sorted.{restart_note}"
-        )
-
-    return report(
-        f"Done{note} in {elapsed:.0f}s. Changed:\n{files_txt}\n"
-        f"Verified compiling and committed.{restart_note}"
+    changed, broken, commit_failed, final_message = _verify_and_commit(
+        work_dir, checkpoint, task, cli_output, elapsed, timed_out, scope, log, report,
     )
+
+    kind = _detect_failure_kind(
+        cli_output,
+        returncode=returncode if "returncode" in locals() else None,
+        timed_out=timed_out,
+        changed_files=changed,
+        broken_files=broken,
+        commit_failed=commit_failed,
+    )
+
+    if kind != _FAILURE_OK:
+        return _maybe_fallback_to_cline(
+            cfg, work_dir, task, timeout, log, report,
+            checkpoint=checkpoint, cli_output=cli_output, kind=kind,
+            primary_message=final_message, scope=scope, started=started,
+        )
+
+    return report(final_message)

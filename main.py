@@ -189,7 +189,12 @@ LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
-CHUNK_SIZE          = 1024
+# 2048 frames @ 16 kHz = 128 ms per mic chunk. The Live API expects ~100 ms
+# audio frames; going smaller (e.g. 512/1024) doesn't reduce perceived
+# latency — it just adds more Python↔PortAudio round-trips and more
+# call_soon_threadsafe hops per second, all of which add *to* latency.
+# 2048 is the sweet spot for first-byte response on a real-time audio stream.
+CHUNK_SIZE          = 2048
 INPUT_AUDIO_MIME    = "audio/pcm;rate=16000"
 
 def _get_api_key() -> str:
@@ -1357,16 +1362,16 @@ class LiteLive:
             f"Your name is {self._asst_name}. "
             f"Always refer to yourself as {self._asst_name}.\n"
             f"{_addr}\n\n"
-            f"LANGUAGE: English ONLY, always — this is not adjustable by request. Always "
-            f"speak and open every conversation in English, and stay in English regardless "
-            f"of what language the user speaks to you in, what language they ask you to "
-            f"switch to, or what any stored 'Language' field in memory below says. Do not "
-            f"switch your speaking language for any reason, including a direct request to "
-            f"do so. You MAY still translate text or discuss other languages as a content "
-            f"task when asked (e.g. 'how do you say X in French') — write the translated "
-            f"content in the target language as the answer, but frame it and speak around "
-            f"it in English; that is not the same as switching your own conversational "
-            f"language, which stays English no matter what.\n\n"
+            f"LANGUAGE: English is the default and the language you open every conversation "
+            f"in. You do NOT switch language on your own initiative — not because of the "
+            f"user's name, accent, location, time of day, system locale, or any 'Language' "
+            f"field in memory below. You DO switch language when the user explicitly asks "
+            f"you to (e.g. 'speak French from now on'), and you stay in that language for "
+            f"the rest of the conversation unless the user asks you to switch again. The "
+            f"'Language' value in memory is background context only and is never a switch "
+            f"trigger by itself. You may still translate text or discuss other languages "
+            f"as a content task when asked; that is not the same as switching your "
+            f"conversational language, which is governed by the rules above.\n\n"
         )
 
         parts = [time_ctx, identity_ctx, EXECUTIVE_DIRECTORY_CONTEXT]
@@ -2583,10 +2588,12 @@ class LiteLive:
                     self.session          = session
                     # Keep buffered audio bounded so stale speech does not pile up and
                     # cause the next command to sound intermittent while the network
-                    # catches up. The fresh mic data is always kept; older chunks are
-                    # discarded when the queue fills.
+                    # catches up. Sized for ~3 s of jitter at ~128 ms/frame: a normal
+                    # network blip absorbs without dropping anything; only sustained
+                    # backpressure triggers a drop, and _queue_live_audio drops the
+                    # oldest queued item so the freshest audio always wins.
                     self.audio_in_queue   = asyncio.Queue(maxsize=200)
-                    self.out_queue        = asyncio.Queue(maxsize=50)
+                    self.out_queue        = asyncio.Queue(maxsize=150)
                     self._turn_done_event = asyncio.Event()
 
                     # Reset transient state that must not carry over from a previous session
