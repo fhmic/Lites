@@ -361,6 +361,37 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "ui_control",
+        "description": (
+            "Operates LITE's OWN interface directly — scrolling the content panel, zooming "
+            "the whole HUD in/out, clicking LITE's own known controls (mute, interrupt, "
+            "settings, the executive directory, and the content panel's prev/next/minimize/"
+            "close — 'next'/'previous' are the button at the top-right corner of the content "
+            "panel for switching between what's been shown), and controlling whatever audio "
+            "or video is currently displayed (a GAS draft's narration, a video preview) with "
+            "play/pause/stop/restart. For 'click' targets NOT in that known list, it falls "
+            "back to matching whatever's actually rendered in the content panel right now — "
+            "a specific button on a displayed draft card, a link in a shown document, etc. — "
+            "and honestly reports if nothing matched, so always relay that back rather than "
+            "assuming success. This is NOT for web pages or other apps — that's "
+            "browser_control (real websites) or computer_settings' screen_click (any other "
+            "app/window on screen). Use this whenever the user wants LITE to interact with "
+            "its own HUD or with something it's currently showing on screen."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action":      {"type": "STRING", "description": "scroll | zoom | click | media"},
+                "direction":   {"type": "STRING", "description": "For scroll: up | down (default down)."},
+                "amount":      {"type": "INTEGER", "description": "For scroll: pixels to scroll (default 400)."},
+                "zoom_action": {"type": "STRING", "description": "For zoom: in | out | reset."},
+                "target":      {"type": "STRING", "description": "For click: mute | interrupt | settings | directory | close directory | next | previous | minimize | close panel, OR a description of anything else currently visible in the content panel to click."},
+                "media_action": {"type": "STRING", "description": "For media: play | pause | stop | restart."},
+            },
+            "required": ["action"]
+        }
+    },
+    {
         "name": "show_executive_directory",
         "description": (
             "Opens LITE's Executive Directory overlay so the user can see the full "
@@ -458,6 +489,13 @@ TOOL_DECLARATIONS = [
             "scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page, "
             "and conservative process cleanup to free memory. Cleanup only closes approved "
             "user applications after the user confirms a named process. "
+            "IMPORTANT — action='screen_click' (params: description) finds and clicks ANY "
+            "visible UI element anywhere on screen, in ANY app or window, by describing it in "
+            "plain language (a screenshot + vision model locates it) — this is how to click a "
+            "button, link, or icon inside a native app or a window that isn't LITE's own "
+            "interface or a browser page (browser pages have their own, more reliable "
+            "browser_control tool — prefer that for actual web pages). action='screen_find' "
+            "does the same lookup without clicking, if just the coordinates are needed. "
             "Use for ANY single computer control command."
         ),
         "parameters": {
@@ -1401,6 +1439,19 @@ class LiteLive:
             elif name == "weather_widget":
                 r = await loop.run_in_executor(None, lambda: weather_widget(parameters=args, player=self.ui))
                 result = r or "Done."
+
+            elif name == "ui_control":
+                ui_action = (args.get("action") or "").strip().lower()
+                if ui_action == "scroll":
+                    result = self.ui.ui_scroll(args.get("direction", "down"), int(args.get("amount") or 400))
+                elif ui_action == "zoom":
+                    result = self.ui.ui_zoom(args.get("zoom_action", "in"))
+                elif ui_action == "click":
+                    result = self.ui.ui_click(args.get("target", ""))
+                elif ui_action == "media":
+                    result = self.ui.ui_media(args.get("media_action", "play"))
+                else:
+                    result = f"Unknown ui_control action '{ui_action}' — use scroll, zoom, click, or media."
 
             elif name == "show_executive_directory":
                 self.ui.show_executive_directory(True)

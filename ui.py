@@ -244,6 +244,16 @@ class HudWindow(QMainWindow):
     _toast_sig        = pyqtSignal(str, str)
     _agent_sig        = pyqtSignal(str)   # active-agent id, for the Executive Directory HUD (see set_active_agent)
     _run_js_sig       = pyqtSignal(str)   # raw JS push — the ONE safe entry point, see _run_js() below
+    _run_js_result_sig = pyqtSignal(str, str)  # (script, request_id) — see run_js_and_wait() on LiteUI.
+                                                 # Separate from _run_js_sig because most HUD pushes are
+                                                 # correctly fire-and-forget (the known nav whitelist in
+                                                 # ui_click is reliable by construction), but a fuzzy
+                                                 # description-based match against arbitrary displayed
+                                                 # content genuinely can fail to find anything — reporting
+                                                 # "Clicked X" regardless would be a false claim, not an
+                                                 # optimistic one.
+    _zoom_sig         = pyqtSignal(float) # QWebEngineView.setZoomFactor is a Qt widget call, not JS —
+                                            # needs its own thread-safe entry point the same way
 
     def __init__(self, face_path: str = ""):
         super().__init__()
@@ -263,6 +273,8 @@ class HudWindow(QMainWindow):
 
         self._lite_ref = None  # set post-construction via set_live_session(); lets
                                 # closeEvent trigger a graceful session-save on window close
+        self._js_result_events = {}   # request_id -> threading.Event, for run_js_and_wait()
+        self._js_results       = {}   # request_id -> value returned by the JS side
 
         self._bridge  = Bridge()
         self._channel = QWebChannel()
@@ -301,6 +313,8 @@ class HudWindow(QMainWindow):
         self._toast_sig.connect(self._js_toast)
         self._agent_sig.connect(self._js_agent)
         self._run_js_sig.connect(self._run_js_on_gui_thread)
+        self._run_js_result_sig.connect(self._run_js_with_result_on_gui_thread)
+        self._zoom_sig.connect(self._apply_zoom)
 
         # ---- wire bridge (JS -> Python) ----
         self._bridge.textCommand.connect(self._on_text_command_recv)
@@ -321,6 +335,7 @@ class HudWindow(QMainWindow):
         self._bridge.contentActionRequest.connect(self._on_content_action)
         self._bridge.hudReady.connect(self._on_hud_ready)
 
+        self._zoom_level = 1.0
         self._view.load(QUrl(self._http_server.url("index.html")))
 
     # ---------- JS push plumbing ----------
@@ -341,6 +356,26 @@ class HudWindow(QMainWindow):
             self._pending_js.append(script)
             return
         self._view.page().runJavaScript(script)
+
+    def _run_js_with_result_on_gui_thread(self, script: str, request_id: str):
+        def _on_result(value):
+            self._js_results[request_id] = value
+            ev = self._js_result_events.get(request_id)
+            if ev:
+                ev.set()
+
+        if not self._hud_ready:
+            # Nothing to run against yet — unblock the waiting caller with no
+            # result rather than leaving it to hang until the timeout.
+            ev = self._js_result_events.get(request_id)
+            if ev:
+                ev.set()
+            return
+        self._view.page().runJavaScript(script, _on_result)
+
+    def _apply_zoom(self, factor: float):
+        self._zoom_level = max(0.25, min(3.0, factor))
+        self._view.setZoomFactor(self._zoom_level)
 
     def _flush_pending_js(self):
         pending, self._pending_js = self._pending_js, []
@@ -830,6 +865,134 @@ class LiteUI:
         and deserves actual attention, as opposed to show_content's movable
         panel which only updates silently if you're not already looking at it."""
         self._win._toast_sig.emit(kicker, text)
+
+    def run_js_and_wait(self, script: str, timeout: float = 3.0):
+        """Thread-safe: runs script and returns whatever it evaluates to (or
+        None on timeout / no HUD yet), unlike _run_js's fire-and-forget push.
+        Use this whenever the caller actually needs to know what happened —
+        a blind optimistic 'done' is fine for a known, reliable action (the
+        nav whitelist in ui_click), but not for a fuzzy match against
+        arbitrary displayed content, which can genuinely find nothing."""
+        import uuid, threading
+        request_id = uuid.uuid4().hex
+        ev = threading.Event()
+        self._win._js_result_events[request_id] = ev
+        self._win._run_js_result_sig.emit(script, request_id)
+        got = ev.wait(timeout)
+        value = self._win._js_results.pop(request_id, None)
+        self._win._js_result_events.pop(request_id, None)
+        return value if got else None
+
+    # ---------- self-interface control (scroll/zoom/click/media on LITE's own HUD) ----------
+    # Two tiers: a curated whitelist for LITE's own chrome (mute, directory,
+    # content-panel nav — always reliable, fire-and-forget), and a fuzzy
+    # description-based fallback that reaches into whatever's actually
+    # displayed right now (a GAS draft card's approve button, a link inside
+    # a shown document, etc.) — which genuinely can fail to match, so it
+    # goes through run_js_and_wait and reports honestly either way.
+    # Free-form clicking on other apps/websites belongs to
+    # actions/computer_control.py's screen_click (vision-based, any app) and
+    # actions/browser_control.py's smart_click (real websites) respectively —
+    # this is specifically LITE's own interface and whatever it's showing.
+    _UI_CLICK_TARGETS = {
+        "mute":            "muteBtn",
+        "interrupt":       "interruptBtn",
+        "stop":            "interruptBtn",
+        "directory":       "directoryBtn",
+        "executive directory": "directoryBtn",
+        "settings":        "settingsBtn",
+        "close directory": "directoryClose",
+        "next":            "contentNext",
+        "previous":        "contentPrev",
+        "back":            "contentPrev",
+        "minimize":        "contentMin",
+        "minimize panel":  "contentMin",
+        "close panel":     "contentClose",
+        "close content":   "contentClose",
+    }
+
+    def ui_click(self, target: str) -> str:
+        """Thread-safe: clicks a known control in LITE's own chrome if the
+        target matches the whitelist; otherwise falls back to a fuzzy
+        text/attribute match against whatever's actually displayed in the
+        content panel right now (a draft card's button, a link, etc.),
+        via smartClickContent on the JS side — and reports honestly if
+        nothing matched, rather than assuming."""
+        key = (target or "").strip().lower()
+        dom_id = self._UI_CLICK_TARGETS.get(key)
+        if dom_id:
+            self._win._run_js(
+                f"(function(){{var el=document.getElementById({json.dumps(dom_id)}); "
+                f"if(el) el.click();}})()"
+            )
+            return f"Clicked {key}."
+
+        result = self.run_js_and_wait(
+            f"JSON.stringify((window.LiteHud && window.LiteHud.smartClickContent) "
+            f"? window.LiteHud.smartClickContent({json.dumps(target)}) "
+            f": {{ok:false, reason:'LiteHud not ready'}})"
+        )
+        try:
+            parsed = json.loads(result) if result else {"ok": False, "reason": "no response"}
+        except Exception:
+            parsed = {"ok": False, "reason": "bad response"}
+
+        if parsed.get("ok"):
+            matched = parsed.get("matched", "").strip()
+            return f"Clicked '{matched}'." if matched else f"Clicked '{target}'."
+        return f"Couldn't find '{target}' anywhere in what's currently displayed."
+
+    def ui_scroll(self, direction: str = "down", amount: int = 400) -> str:
+        """Thread-safe: scrolls the content panel's body (where a long email,
+        document, or table is currently being shown) — not the whole page,
+        which has no natural scroll of its own since every HUD panel is
+        fixed-position."""
+        delta = -abs(amount) if (direction or "").strip().lower() in ("up", "back") else abs(amount)
+        self._win._run_js(
+            f"(function(){{var b=document.getElementById('contentBody'); "
+            f"if(b) b.scrollBy({{top:{delta}, behavior:'smooth'}});}})()"
+        )
+        return f"Scrolled {'up' if delta < 0 else 'down'}."
+
+    def ui_zoom(self, action: str = "in") -> str:
+        """Thread-safe: zooms LITE's own interface in/out/to default, via
+        QWebEngineView's native zoom (not a CSS/JS hack) — scales the whole
+        HUD proportionally, same as browser zoom."""
+        a = (action or "").strip().lower()
+        current = getattr(self._win, "_zoom_level", 1.0)
+        if a in ("in", "increase", "bigger"):
+            factor = round(current * 1.2, 2)
+        elif a in ("out", "decrease", "smaller"):
+            factor = round(current / 1.2, 2)
+        elif a in ("reset", "default", "100", "100%"):
+            factor = 1.0
+        else:
+            return f"'{action}' isn't a zoom action I recognize — use in, out, or reset."
+        factor = max(0.5, min(2.5, factor))
+        self._win._zoom_sig.emit(factor)
+        return f"Zoomed to {int(factor * 100)}%."
+
+    def ui_media(self, action: str = "play") -> str:
+        """Thread-safe: play/pause/stop/restart whatever audio or video is
+        currently shown in the content panel (a GAS draft's fallback
+        narration, a video preview, etc.). Honestly reports if nothing's
+        currently playable rather than assuming."""
+        a = (action or "").strip().lower()
+        if a not in ("play", "pause", "stop", "restart"):
+            return f"'{action}' isn't a media action I recognize — use play, pause, stop, or restart."
+        result = self.run_js_and_wait(
+            f"JSON.stringify((window.LiteHud && window.LiteHud.controlMedia) "
+            f"? window.LiteHud.controlMedia({json.dumps(a)}) "
+            f": {{ok:false, reason:'LiteHud not ready'}})"
+        )
+        try:
+            parsed = json.loads(result) if result else {"ok": False, "reason": "no response"}
+        except Exception:
+            parsed = {"ok": False, "reason": "bad response"}
+        if parsed.get("ok"):
+            verb = {"play": "Playing", "restart": "Playing", "pause": "Paused", "stop": "Stopped"}[a]
+            return f"{verb}."
+        return f"Couldn't {a} — {parsed.get('reason', 'nothing playable is currently displayed')}."
 
     # ---------- executive directory (agent personas) ----------
     def set_active_agent(self, agent_id: str) -> None:
