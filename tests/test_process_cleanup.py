@@ -1,8 +1,9 @@
+import os
 import unittest
 from unittest.mock import patch
 
 from actions import computer_settings
-from actions.code_agent import _command_template, _minimal_command_template, _cline_adapter_path
+from actions.code_agent import _command_template, _minimal_command_template
 
 
 class FakeProcess:
@@ -27,28 +28,59 @@ class FakeProcess:
 
 
 class ProcessCleanupTest(unittest.TestCase):
-    def test_code_agent_command_is_bounded_for_fcc(self):
-        command = _command_template({"claude_code_command": ["claude.cmd", "-p", "{prompt}"]})
+    def test_code_agent_command_uses_user_template(self):
+        command = _command_template({"cline_command": ["cline.cmd", "-p", "{prompt}"]})
 
-        self.assertIn("--tools", command)
-        self.assertIn("Read,Edit,Write,Bash,Glob,Grep", command)
-        self.assertIn("--setting-sources", command)
-        self.assertIn("project,local", command)
-        self.assertIn("--model", command)
-        self.assertIn("sonnet", command)
-        self.assertIn("--system-prompt", command)
-        self.assertIn("--strict-mcp-config", command)
-        self.assertIn("--disable-slash-commands", command)
+        # User's cline_command list is the full override — should pass through
+        # verbatim, no flags added or stripped by LITE.
+        self.assertEqual(command, ["cline.cmd", "-p", "{prompt}"])
 
-    def test_code_agent_has_minimal_fcc_fallback(self):
-        command = _minimal_command_template(["claude.cmd", "-p", "{prompt}", "--tools", "Read", "--model", "bad"])
+    def test_code_agent_command_falls_back_to_defaults(self):
+        # No cline_command / cline_cli / env override → default template.
+        command = _command_template({})
 
-        self.assertIn("--tools", command)
-        self.assertEqual(command[command.index("--tools") + 1], "")
+        self.assertEqual(len(command), 5)
+        self.assertEqual(command[0], "cline.cmd" if os.name == "nt" else "cline")
+        self.assertEqual(command[1], "-p")
+        self.assertEqual(command[2], "{prompt}")
+        self.assertIn("--no-session", command)
+        self.assertIn("--auto-approve", command)
+
+    def test_code_agent_command_uses_cline_cli_override(self):
+        command = _command_template({"cline_cli": "/custom/path/to/cline"})
+
+        self.assertEqual(command[0], "/custom/path/to/cline")
+        self.assertIn("--no-session", command)
+        self.assertIn("--auto-approve", command)
+
+    def test_code_agent_minimal_template_strips_user_overrides(self):
+        command = _minimal_command_template(
+            ["cline.cmd", "-p", "{prompt}", "--model", "bad", "--system-prompt", "evil", "--no-session", "--auto-approve"]
+        )
+
+        # Non-essential flags get dropped, but the executable and the
+        # headless / auto-approve switches must stay so Cline still runs
+        # non-interactively.
+        self.assertNotIn("--model", command)
         self.assertNotIn("bad", command)
+        self.assertNotIn("--system-prompt", command)
+        self.assertNotIn("evil", command)
+        self.assertIn("-p", command)
+        self.assertIn("{prompt}", command)
+        self.assertIn("--no-session", command)
+        self.assertIn("--auto-approve", command)
 
-    def test_cline_adapter_has_configurable_path(self):
-        self.assertEqual(_cline_adapter_path({}).name, "fcc-cline.exe")
+    def test_code_agent_minimal_template_rebuilds_when_template_empty(self):
+        # If the user's template lost the executable or the headless
+        # switches, the minimal template rebuilds a safe default from the
+        # first positional (the executable).
+        command = _minimal_command_template(["cline.cmd"])
+
+        self.assertEqual(command[0], "cline.cmd")
+        self.assertIn("-p", command)
+        self.assertIn("{prompt}", command)
+        self.assertIn("--no-session", command)
+        self.assertIn("--auto-approve", command)
 
     def test_cleanup_reports_candidates_without_confirmation(self):
         chrome = FakeProcess(101, "chrome.exe", 900)

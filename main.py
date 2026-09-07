@@ -117,7 +117,7 @@ from actions.youtube_video     import youtube_video
 from actions.desktop           import desktop_control
 from actions.browser_control   import browser_control
 from actions.file_controller   import file_controller
-from actions.code_agent         import code_agent, fcc_server_control
+from actions.code_agent         import code_agent
 from agents.rics_agent import rics_agent
 from agents.data_analytics_agent import data_analytics_agent
 from agents.fta_agent import fta_agent
@@ -586,16 +586,16 @@ TOOL_DECLARATIONS = [
         "name": "code_agent",
         "description": (
             "Delegates any coding, automation, self-improvement, or full-project task "
-            "to a real Claude Code agentic session running locally (via the fcc-claude "
-            "proxy) — it reads files, edits, runs commands, and loops until the task is "
-            "actually done, rather than a single-shot guess. Covers what code_helper, "
-            "dev_agent, and the old automation_coding_agent used to do: fixing a bug, "
-            "building a new feature into LITE itself, scaffolding a whole new project, "
-            "or ad-hoc 'write me a script for X' help — just describe the task in plain "
-            "language. Every run is git-checkpointed first and independently verified "
-            "(every changed .py file must still compile) before being kept; anything "
-            "that fails verification is automatically rolled back, so this never leaves "
-            "LITE or another project in a broken state."
+            "to the Cline VS Code extension running headless — it reads files, edits, "
+            "runs commands, and loops until the task is actually done, rather than a "
+            "single-shot guess. Covers what code_helper, dev_agent, and the old "
+            "automation_coding_agent used to do: fixing a bug, building a new feature "
+            "into LITE itself, scaffolding a whole new project, or ad-hoc 'write me a "
+            "script for X' help — just describe the task in plain language. Every run "
+            "is git-checkpointed first and independently verified (every changed .py "
+            "file must still compile) before being kept; anything that fails "
+            "verification is automatically rolled back, so this never leaves LITE or "
+            "another project in a broken state."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -603,26 +603,9 @@ TOOL_DECLARATIONS = [
                 "task":        {"type": "STRING", "description": "The task, in the user's words — a fix, a feature, a whole project, or ad-hoc code help."},
                 "scope":       {"type": "STRING", "description": "self (default — LITE's own codebase) | external (any other project Felix names; requires target)"},
                 "target":      {"type": "STRING", "description": "For scope=external: absolute or home-relative path to the project folder. Not needed for scope=self."},
-                "timeout":     {"type": "INTEGER", "description": "Max seconds to let the Claude Code session run before stopping it and verifying whatever it left behind (default 900)."},
+                "timeout":     {"type": "INTEGER", "description": "Max seconds to let the Cline session run before stopping it and verifying whatever it left behind (default 900)."},
             },
             "required": ["task"]
-        }
-    },
-    {
-        "name": "fcc_server_control",
-        "description": (
-            "Controls the local fcc-claude server used by code_agent. "
-            "Use action='start' when the user asks to start fcc, "
-            "action='stop' when they ask to close or stop the fcc server, "
-            "and action='status' to check it. This stops only the fcc server, "
-            "not LITE."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "action": {"type": "STRING", "description": "start | stop | status"}
-            },
-            "required": ["action"]
         }
     },
     {
@@ -1528,10 +1511,6 @@ class LiteLive:
                 result = r or "Done."
                 # No show_content call here — code_agent pushes its own HUD
                 # content (a single plain-text run report).
-
-            elif name == "fcc_server_control":
-                r = await loop.run_in_executor(None, lambda: fcc_server_control(parameters=args))
-                result = r or "Done."
 
             elif name == "rics_agent":
                 r = await loop.run_in_executor(None, lambda: rics_agent(parameters=args, player=self.ui, speak=self.speak))
