@@ -174,7 +174,12 @@ def _try_custom(prompt: str, timeout: int = 30) -> str:
     cfg = _load_config()
     url   = (cfg.get("fallback_api_url") or "").strip().rstrip("/")
     if not url:
-        raise RuntimeError("no custom fallback endpoint configured")
+        raise RuntimeError(
+            "no custom fallback endpoint configured — set fallback_api_url "
+            "(+ fallback_api_key + fallback_model) in config/api_keys.json to "
+            "use any OpenAI-compatible provider (OpenRouter, xkiro, a private "
+            "LLM gateway, LM Studio, Ollama, etc.)"
+        )
     key   = (cfg.get("fallback_api_key") or "").strip()
     model = (cfg.get("fallback_model")   or "").strip() or "default"
 

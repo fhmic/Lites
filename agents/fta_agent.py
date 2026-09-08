@@ -84,12 +84,30 @@ def _gather_statement_text(p: dict, player=None, speak=None) -> tuple[str, str |
         if not path.exists():
             return "", f"File not found: {file_path}"
         ftype = _detect_type(path)
-        action = "extract_text" if ftype == "pdf" else "analyze"
-        extracted = file_processor(
-            parameters={"file_path": file_path, "action": action},
-            player=player, speak=speak,
-        )
-        parts.append(extracted)
+
+        # Tabular files (xlsx/xls/ods/csv/tsv) are dumped to a CSV-style text
+        # representation here, NOT routed through file_processor's generic
+        # `analyze` action. The `analyze` action asks the LLM to summarize the
+        # table — we get a Gemini paragraph back, not the numbers themselves,
+        # and the downstream EXTRACT step then has nothing to extract figures
+        # from. The CSV dump preserves column names and numeric values in a
+        # shape the extraction prompt can parse.
+        if ftype in ("excel", "csv"):
+            tabular = _dump_tabular_as_text(path, ftype)
+            if tabular is None:
+                return "", (
+                    f"Couldn't read the tabular file at {file_path}. If it's an "
+                    f".xlsx, make sure `openpyxl` is installed (pip install openpyxl); "
+                    f"for older .xls files, install `xlrd`."
+                )
+            parts.append(tabular)
+        else:
+            action = "extract_text" if ftype == "pdf" else "analyze"
+            extracted = file_processor(
+                parameters={"file_path": file_path, "action": action},
+                player=player, speak=speak,
+            )
+            parts.append(extracted)
 
     statement_text = (p.get("statement_text") or "").strip()
     if statement_text:
@@ -102,6 +120,34 @@ def _gather_statement_text(p: dict, player=None, speak=None) -> tuple[str, str |
             "figures pasted directly."
         )
     return "\n\n".join(parts), None
+
+
+def _dump_tabular_as_text(path, ftype: str) -> str | None:
+    """Read an .xlsx/.xls/.ods/.csv/.tsv file and return a CSV-style text
+    dump of the first 200 rows (with the full column list) suitable for the
+    extraction prompt to parse. Returns None if the file can't be read."""
+    try:
+        import pandas as pd
+    except ImportError:
+        return None
+    try:
+        if ftype == "csv":
+            df = pd.read_csv(path, encoding="utf-8", errors="replace")
+        else:
+            # xlsx / xls / ods all go through read_excel (openpyxl/xlrd engines).
+            df = pd.read_excel(path)
+    except Exception:
+        return None
+
+    if df is None or df.empty:
+        return (
+            f"Tabular file at {path} was read but contained no rows. "
+            "If the workbook is multi-sheet, export the relevant sheet as its "
+            "own .xlsx or .csv and re-upload."
+        )
+
+    # CSV keeps column names + numeric values intact, no pretty-print ambiguity.
+    return df.head(200).to_csv(index=False)
 
 
 def _do_statement_interpretation(p: dict, player=None, speak=None) -> str:
@@ -132,14 +178,47 @@ def _do_statement_interpretation(p: dict, player=None, speak=None) -> str:
     )
     try:
         resp = generate_content(extract_prompt)
-        figures = _parse_json_block(resp.text if resp else "") or {}
+        raw_resp = resp.text if resp else ""
+        figures = _parse_json_block(raw_resp) or {}
     except Exception as e:
         return f"Couldn't read the statement — {e}"
 
     if not any(v is not None for k, v in figures.items() if k != "currency"):
+        # Build a debug snippet so a future failure isn't a dead-end. Don't
+        # dump the whole statement (could be huge / sensitive) — just the
+        # first ~400 chars of the model's response and a column-name preview
+        # when the input was tabular, so we can tell at a glance whether the
+        # model got a CSV it couldn't parse vs. an empty file vs. a non-
+        # financial dataset.
+        preview_lines = [ln for ln in raw_resp.splitlines() if ln.strip()][:6]
+        preview = "\n".join(preview_lines)[:400] if preview_lines else "(empty response)"
+
+        column_hint = ""
+        if file_path:
+            from pathlib import Path
+            from actions.file_processor import _detect_type
+            if _detect_type(Path(file_path)) in ("excel", "csv"):
+                try:
+                    import pandas as pd
+                    df = pd.read_excel(Path(file_path)) if Path(file_path).suffix.lower() in (".xlsx", ".xls", ".ods") \
+                         else pd.read_csv(Path(file_path), encoding="utf-8", errors="replace")
+                    column_hint = (
+                        f"\n\nColumns the model saw in the file: {list(df.columns)}\n"
+                        f"First row sample: {df.head(1).to_dict(orient='records')}"
+                    )
+                except Exception:
+                    pass
+
         return (
             "I couldn't find identifiable financial figures in what was provided — "
-            "double-check the file/text actually contains statement data."
+            "double-check the file/text actually contains statement data, and that "
+            "the column names match common ones (Revenue / Sales, Net Income / "
+            "Profit, Total Assets, Total Liabilities, Current Assets, Current "
+            "Liabilities, Inventory, COGS, EBIT, Interest Expense). "
+            "Values stored as text rather than numbers also won't be picked up — "
+            "highlight the column and convert to number in Excel before re-uploading.\n\n"
+            f"Model response (first {len(preview)} chars):\n{preview}"
+            f"{column_hint}"
         )
 
     # Step 2: COMPUTE — real code, never the LLM. Same discipline as Phase C.

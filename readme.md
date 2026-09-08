@@ -84,12 +84,12 @@ The `code_agent` tool delegates code-writing tasks to the locally installed [Cli
 
 ```json
 "cline_cli": "cline.cmd",
-"cline_command": ["cline.cmd", "-p", "{prompt}", "--no-session", "--auto-approve"],
+"cline_command": ["cline.cmd", "--auto-approve", "true", "{prompt}"],
 "cline_api_key": "",
 "cline_base_url": ""
 ```
 
-Cline must be installed and available on PATH — no separate proxy or server to start. `cline_api_key` / `cline_base_url` (or the `CLINE_API_KEY` / `CLINE_BASE_URL` env vars) are only needed if you want to point Cline at a non-default provider.
+Cline must be installed and available on PATH — no separate proxy or server to start. `cline_api_key` / `cline_base_url` (or the `CLINE_API_KEY` / `CLINE_BASE_URL` env vars) are only needed if you want to point Cline at a non-default provider. The default command template above matches Cline 3.x (prompt is a positional argument, `--auto-approve` takes a boolean value); check `cline --help` on your machine and override `cline_command` in `config/api_keys.json` if your installed version expects different flags.
 
 ---
 

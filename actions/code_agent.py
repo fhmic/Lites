@@ -44,12 +44,13 @@ Requires on the machine running LITE:
     LITE for this tool to work.
 
 NOTE on CLI flags: Cline's exact headless-mode flags can change
-between versions, and I can't verify Felix's installed version from here.
-The command template below is the best-known invocation as of this
-writing (`cline -p "<prompt>" --no-session --auto-approve`) but is
-fully overridable via config/api_keys.json -> "cline_command" (a list,
-with "{prompt}" as the placeholder) if it doesn't match what
-`cline --help` shows on his machine.
+between versions, and the version installed on Felix's machine can
+differ from the one verified during development. The default template
+below matches Cline 3.x (prompt is a positional argument, --auto-approve
+takes a boolean value) and is fully overridable via
+config/api_keys.json -> "cline_command" (a list, with "{prompt}" as the
+placeholder) if `cline --help` on Felix's machine shows a different
+flag set.
 """
 import json
 import os
@@ -73,8 +74,14 @@ API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 DEFAULT_CLINE_CLI      = "cline.cmd" if os.name == "nt" else "cline"
 DEFAULT_TIMEOUT_S      = 900          # 15 min — an agentic session can genuinely take a while
+# Cline 3.x headless invocation: the prompt is a *positional* argument
+# (`cline [options] [command] [prompt]` per `cline --help`), and the
+# auto-approve switch takes a boolean value. There is no --no-session flag
+# in current Cline — sessions that finish are just done. Override via
+# `cline_command` in config/api_keys.json if your installed Cline version
+# expects different flags.
 DEFAULT_COMMAND_TPL    = [
-    DEFAULT_CLINE_CLI, "-p", "{prompt}", "--no-session", "--auto-approve",
+    DEFAULT_CLINE_CLI, "--auto-approve", "true", "{prompt}",
 ]
 
 AGENT_NAME = "Code Agent"
@@ -87,6 +94,13 @@ def _load_config() -> dict:
         return json.loads(API_CONFIG_PATH.read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
+
+
+# Headless flags that the minimal retry template must keep so Cline still
+# runs non-interactively in act mode. The executable and the {prompt}
+# placeholder are also kept; everything else (--model, --system, --thinking,
+# --provider, custom flags) gets dropped on retry.
+_CLINE_KEEP_FLAGS = {"--auto-approve", "true", "{prompt}"}
 
 
 def _command_template(cfg: dict) -> list:
@@ -111,24 +125,24 @@ def _command_template(cfg: dict) -> list:
         or os.environ.get("CLINE_CLI")
         or DEFAULT_CLINE_CLI
     )
-    return [
-        str(cmd), "-p", "{prompt}", "--no-session", "--auto-approve",
-    ]
+    return [str(cmd), "--auto-approve", "true", "{prompt}"]
 
 
 def _minimal_command_template(command: list) -> list:
     """Build a minimal last-resort Cline command with optional flags dropped.
 
-    Keeps the executable, the prompt placeholder, and the headless /
-    auto-approve switches (so Cline still runs non-interactively) but
-    drops any extra model/system/tools overrides the user may have set
-    in the full template. Used when the primary run trips an error
+    Keeps the executable, the prompt placeholder, and the auto-approve
+    switches (so Cline still runs non-interactively in act mode) but
+    drops any extra model/system/provider overrides the user may have
+    set in the full template. Used when the primary run trips an error
     that's known to be caused by one of those overrides.
     """
-    keep = {"-p", "{prompt}", "--no-session", "--auto-approve"}
+    keep = _CLINE_KEEP_FLAGS
     minimal = [part for part in command if part in keep]
-    if "-p" not in minimal:
-        minimal = [command[0], "-p", "{prompt}", "--no-session", "--auto-approve"]
+    if "{prompt}" not in minimal:
+        # Rebuild a safe default from the first positional (the executable)
+        # if the user's template lost the placeholder.
+        minimal = [command[0], "--auto-approve", "true", "{prompt}"]
     return minimal
 
 
@@ -136,9 +150,9 @@ def _minimal_command_template(command: list) -> list:
 # model authentication through VS Code, so LITE doesn't need to wire up
 # any proxy or auth tokens; the env overrides below are opt-in knobs for
 # users who want to point Cline at a different model endpoint.
-DEFAULT_CLINE_VSCODE_BIN  = "cline.cmd" if os.name == "nt" else "cline"
+DEFAULT_CLINE_VSCODE_BIN  = DEFAULT_CLINE_CLI
 DEFAULT_CLINE_VSCODE_TPL  = [
-    DEFAULT_CLINE_VSCODE_BIN, "-p", "{prompt}", "--no-session", "--auto-approve",
+    DEFAULT_CLINE_VSCODE_BIN, "--auto-approve", "true", "{prompt}",
 ]
 
 
@@ -162,7 +176,7 @@ def _cline_vscode_command(cfg: dict) -> list | None:
     if not tpl:
         cmd = cfg.get("cline_cli") or os.environ.get("CLINE_CLI")
         if cmd:
-            tpl = [str(cmd), "-p", "{prompt}", "--no-session", "--auto-approve"]
+            tpl = [str(cmd), "--auto-approve", "true", "{prompt}"]
     if not tpl:
         tpl = list(DEFAULT_CLINE_VSCODE_TPL)
 
@@ -192,6 +206,95 @@ def _cline_env(cfg: dict) -> dict:
     if cfg.get("cline_base_url"):
         env["CLINE_BASE_URL"] = cfg["cline_base_url"]
     return env
+
+
+def _preflight_cline(cfg: dict, log) -> list[str]:
+    """Run lightweight Cline diagnostics so failures later in the run have
+    actionable context. Returns a list of human-readable notes (also sent
+    to the log). Never raises — diagnostics must never block a real run.
+
+    What it does:
+      1. `cline --version`  — confirms the binary is on PATH and runnable.
+         A half-broken install (binary present, crashes on launch) gets
+         caught here instead of in the middle of the actual task.
+      2. `cline doctor`     — checks the Cline hub daemon's health and
+         reports its URL. The hub is the bit that listens for the CLI's
+         API calls; an unhealthy hub is a strong signal that even if
+         the binary runs, no LLM call will succeed.
+      3. Resolves the model provider Cline is configured to use
+         (CLINE_BASE_URL from cfg / env, else the user's default), so
+         the user can see exactly which endpoint their session will hit.
+
+    All output is captured — the Cline CLI on Windows is noisy and we
+    only want the high-signal bits in the log.
+    """
+    notes: list[str] = []
+    cli_name = (
+        cfg.get("cline_cli")
+        or os.environ.get("CLINE_CLI")
+        or DEFAULT_CLINE_CLI
+    )
+
+    # ── 1. Version probe ─────────────────────────────────────────────────
+    try:
+        v = subprocess.run(
+            [cli_name, "--version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        version_line = (v.stdout or v.stderr or "").strip().splitlines()
+        version = version_line[0] if version_line else "(no output)"
+        notes.append(f"cline --version -> {version}")
+    except FileNotFoundError:
+        notes.append(f"cline --version -> not found (`{cli_name}` not on PATH)")
+    except subprocess.TimeoutExpired:
+        notes.append("cline --version -> timed out after 10s")
+    except Exception as e:
+        notes.append(f"cline --version -> error: {e}")
+
+    # ── 2. Doctor (hub health) ───────────────────────────────────────────
+    try:
+        d = subprocess.run(
+            [cli_name, "doctor"],
+            capture_output=True, text=True, timeout=15,
+        )
+        dlines = (d.stdout or "").strip().splitlines()
+        # Pull just the high-signal lines; `doctor` prints ~12 of them.
+        interesting = [
+            ln for ln in dlines
+            if any(k in ln for k in (
+                "version", "hub url", "hub healthy", "hub uptime",
+                "listeners", "cli processes", "sidecar processes",
+                "error",
+            ))
+        ][:8]
+        if interesting:
+            notes.append("cline doctor -> " + " | ".join(
+                ln.strip() for ln in interesting
+            ))
+        elif d.returncode != 0:
+            err = (d.stderr or d.stdout or "").strip().splitlines()
+            notes.append("cline doctor -> non-zero exit: " + (err[0] if err else "unknown"))
+        else:
+            notes.append("cline doctor -> no output (unexpected)")
+    except FileNotFoundError:
+        # Same as above; the version probe already reported it.
+        pass
+    except subprocess.TimeoutExpired:
+        notes.append("cline doctor -> timed out after 15s")
+    except Exception as e:
+        notes.append(f"cline doctor -> error: {e}")
+
+    # ── 3. Resolved API endpoint ─────────────────────────────────────────
+    base_url = (
+        cfg.get("cline_base_url")
+        or os.environ.get("CLINE_BASE_URL")
+        or "(unset — Cline uses whatever provider is configured in `cline auth`)"
+    )
+    notes.append(f"API endpoint   -> {base_url}")
+
+    for line in notes:
+        log(line)
+    return notes
 
 
 def _run_cline(cfg: dict, work_dir: Path, task: str, timeout: int, command_tpl: list | None = None) -> str:
@@ -535,6 +638,14 @@ def code_agent(
             f"cline_cli in config/api_keys.json to its full path."
         )
 
+    # ── Preflight: Cline diagnostics ───────────────────────────────────────
+    # Probe `cline --version` + `cline doctor` and report the resolved API
+    # endpoint, so that any failure later in the run has actionable context
+    # the user can read in the log instead of an opaque "Cline ran but left
+    # no changes".
+    log("Cline preflight:")
+    preflight = _preflight_cline(cfg, log)
+
     # ── Checkpoint ───────────────────────────────────────────────────────────
     checkpoint = _ensure_checkpoint(work_dir, log)
     if not checkpoint:
@@ -570,6 +681,36 @@ def code_agent(
             returncode = 124
 
     elapsed = time.monotonic() - started
+
+    # ── Interpret the most common Cline failure modes ─────────────────────
+    # If Cline exited but the output reads as an upstream connectivity
+    # problem rather than a "task done" or "task attempted" message,
+    # surface an actionable explanation BEFORE the verify pipeline runs —
+    # so the user can fix the right thing (re-run `cline auth`, restart
+    # the provider proxy, etc.) instead of staring at a "left no changes"
+    # verdict.
+    lower = cli_output.lower()
+    if (
+        ("cannot connect to api" in lower or "unable to connect" in lower
+         or "connection refused" in lower or "econnrefused" in lower
+         or "etimedout" in lower or "network" in lower)
+        and "left no changes" in final_message.lower()
+    ):
+        provider_hint = (
+            (cfg.get("cline_base_url")
+             or os.environ.get("CLINE_BASE_URL")
+             or "Cline's currently-configured provider (set via `cline auth`)")
+        )
+        final_message = (
+            final_message
+            + "\n\n[Code Agent] The Cline CLI ran but couldn't reach its model API. "
+              f"Resolved endpoint: {provider_hint}. "
+              "If that's a custom proxy, it's likely down — restart it, or re-run "
+              "`cline auth` to point Cline at a different provider. "
+              "If the endpoint looks right, run `cline doctor` from a terminal for "
+              "a fuller diagnostic."
+        )
+        log("Cline exit was an upstream API connectivity failure — not a code-task failure.")
 
     # ── Verify ───────────────────────────────────────────────────────────────
     changed, broken, commit_failed, final_message = _verify_and_commit(
