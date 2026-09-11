@@ -269,8 +269,8 @@ class FallbackVoice:
             return
 
         self._log(
-            f"Fallback voice active — turn-based, conversational only (no tool use) "
-            f"until the primary engine reconnects. Say 'stop listening' to pause it."
+            "Fallback voice active — turn-based, conversational only (no tool use) "
+            "until the primary engine reconnects. Say 'stop listening' to pause it."
         )
         try:
             self._speak(

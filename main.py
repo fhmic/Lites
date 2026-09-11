@@ -784,13 +784,17 @@ TOOL_DECLARATIONS = [
             "(reporting to LITE) covering data across LITE's other agents/data sources "
             "(currently: sales pipeline, affiliate earnings, and CRM activity from GAS/"
             "RICS, via fixed, safe queries — never open-ended SQL), plus analyzing CSV/"
-            "Excel files the user provides. Does NOT do financial/accounting analysis "
-            "(P&L, cash flow, forecasting) — that's the Finance, FP&A & Treasury/Cashflow "
-            "Agent's job once it exists, not this one's. Hand it a plain-language "
-            "question — it routes itself to the right query; you don't need to "
-            "pre-decide action unless the user was specific. Call when the user asks how "
-            "the business/pipeline/earnings are doing, wants a data snapshot, or wants a "
-            "spreadsheet/CSV file analyzed. Does NOT do charting/visualization yet."
+            "Excel files the user provides. For an uploaded financial statement "
+            "specifically (income statement, balance sheet, cash flow statement, or a "
+            "request for ratio analysis), prefer fta_agent directly — it does real "
+            "ratio computation (agents/financial_ratios.py), not just an AI summary; "
+            "this agent will also auto-detect and hand those off to fta_agent itself "
+            "as a safety net, but calling fta_agent directly is the more precise route. "
+            "Hand it a plain-language question — it routes itself to the right query; "
+            "you don't need to pre-decide action unless the user was specific. Call "
+            "when the user asks how the business/pipeline/earnings are doing, wants a "
+            "data snapshot, or wants a non-financial-statement spreadsheet/CSV file "
+            "analyzed. Does NOT do charting/visualization yet."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -841,7 +845,7 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":              {"type": "STRING", "description": "investment_appraisal (default) | opportunity_appraisal | statement_interpretation | market_research | ma_advisory | tax_regulatory"},
+                "action":              {"type": "STRING", "description": "investment_appraisal | opportunity_appraisal | statement_interpretation | market_research | ma_advisory | tax_regulatory — safe to omit: inferred automatically (a file_path or statement_text always infers statement_interpretation, so any uploaded/pasted financial report routes correctly without setting this)."},
                 "cashflows":           {"type": "ARRAY", "items": {"type": "NUMBER"}, "description": "For investment_appraisal: the initial outlay as a NEGATIVE number, followed by each period's expected return, e.g. [-10000, 3000, 3000, 3000, 3000, 3000]."},
                 "rate":                {"type": "NUMBER", "description": "For investment_appraisal/opportunity_appraisal: discount rate — accepts either form, e.g. 10 or 0.10 for 10%. Defaults to 15% for opportunity_appraisal if omitted."},
                 "finance_rate":        {"type": "NUMBER", "description": "For MIRR only — the rate paid on financing outflows."},
@@ -1804,7 +1808,7 @@ class LiteLive:
                                 # alone don't reliably stop this on native-audio models, so
                                 # force a correction now rather than let it continue.
                                 if self.session and _foreign_script_ratio(full_out) > 0.15:
-                                    print(f"[Language] ⚠️ Language drift detected — forcing correction to English")
+                                    print("[Language] ⚠️ Language drift detected — forcing correction to English")
                                     try:
                                         await self.session.send_client_content(
                                             turns={"role": "user", "parts": [{"text": (
@@ -2185,7 +2189,7 @@ class LiteLive:
                                 turns={"parts": [{"text": msg}]},
                                 turn_complete=True,
                             )
-                            self.ui.write_log(f"SYS: Monitor alert sent.")
+                            self.ui.write_log("SYS: Monitor alert sent.")
                             await asyncio.sleep(6)   # gap between consecutive alerts
                     except Exception as e:
                         print(f"[Monitor] ⚠️ Background check error: {e}")
@@ -2462,9 +2466,16 @@ class LiteLive:
         # Start dashboard (optional — needs: pip install fastapi "uvicorn[standard]" cryptography)
         try:
             from dashboard.server import DashboardServer
+            from core.step_bus    import register as _register_step_bus
             self._dashboard = DashboardServer()
             self._dashboard.set_connect_callback(self._on_phone_connected)
             self._dashboard.set_file_callback(self._on_file_uploaded)
+            # Wires actions/code_agent.py's live step events (Checkpoint ->
+            # Delegate -> Verify -> Rollback/Commit) through to the Remote
+            # Dashboard's "Steps" tab. code_agent runs in a worker thread
+            # (run_in_executor), so step_bus needs this loop reference to
+            # broadcast back onto it safely.
+            _register_step_bus(self._dashboard, self._loop)
             asyncio.create_task(self._dashboard.serve())
             # Both run for the whole app lifetime, not just inside an active
             # Gemini Live session — _relay_phone_audio used to only exist

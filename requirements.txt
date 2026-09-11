@@ -8,7 +8,6 @@ pillow
 requests
 beautifulsoup4
 ddgs
-pyflakes
 playwright
 pyautogui
 pyperclip
@@ -16,6 +15,9 @@ pygetwindow
 opencv-python
 numpy
 numpy_financial
+pandas
+openpyxl
+xlrd
 mss
 psutil
 send2trash

@@ -336,7 +336,7 @@ def _ensure_crypto_js() -> None:
         print("[Dashboard] CryptoJS cached — will serve locally from now on.")
     except Exception as e:
         print(f"[Dashboard] CryptoJS download failed: {e}")
-        print(f"[Dashboard] Encryption will fall back to CDN load on client.")
+        print("[Dashboard] Encryption will fall back to CDN load on client.")
 
 
 _ensure_crypto_js()
@@ -633,6 +633,116 @@ class DashboardServer:
             if self._wake_callback:
                 self._wake_callback()
             return JSONResponse({"ok": True})
+
+        # ── Dashboard tabs: Usage / Library / Sessions / Projects / Steps ──────
+        # All auth-protected the same way as the rest of /api/*. Each one is a
+        # thin wrapper around a standalone module (core/usage_tracker.py,
+        # memory/library.py, memory/memory_manager.py + core/conversation_log.py,
+        # memory/project_registry.py, core/step_bus.py) — none of this holds
+        # any state of its own beyond what those modules already persist.
+
+        @app.get("/api/usage")
+        async def usage_ep(req: Request, days: int = 7):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from core.usage_tracker import summary
+            return JSONResponse(summary(days=max(1, min(days, 90))))
+
+        @app.get("/api/library")
+        async def library_list_ep(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from memory.library import list_items
+            return JSONResponse({"items": list_items()})
+
+        @app.post("/api/library")
+        async def library_add_ep(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from memory.library import add_item
+            body  = await req.json()
+            entry = add_item(body.get("name", ""), body.get("text", ""))
+            if entry is None:
+                return JSONResponse({"error": "name and text are both required"}, status_code=400)
+            return JSONResponse({"ok": True, "item": entry})
+
+        @app.delete("/api/library/{item_id}")
+        async def library_delete_ep(item_id: str, req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from memory.library import delete_item
+            return JSONResponse({"ok": delete_item(item_id)})
+
+        @app.post("/api/library/{item_id}/run")
+        async def library_run_ep(item_id: str, req: Request):
+            """Fires a saved template the same way a typed dashboard command
+            does — enqueued through _command_queue so it flows through the
+            exact same Gemini-Live-or-fallback path as /api/command."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from memory.library import get_item
+            item = get_item(item_id)
+            if item is None:
+                return JSONResponse({"error": "Not found"}, status_code=404)
+            await self._command_queue.put(item["text"])
+            if self._wake_callback:
+                self._wake_callback()
+            return JSONResponse({"ok": True, "text": item["text"]})
+
+        @app.get("/api/sessions")
+        async def sessions_ep(req: Request, query: str = "", when: str = "", days_back: int = 3):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from memory.memory_manager import peek_sessions
+                summaries = peek_sessions()
+            except Exception:
+                summaries = []
+            try:
+                from core.conversation_log import recall
+                transcript = recall(query=query, when=when, days_back=max(1, min(days_back, 30)))
+            except Exception as e:
+                transcript = f"Unavailable: {e}"
+            return JSONResponse({"summaries": summaries, "transcript": transcript})
+
+        @app.get("/api/projects")
+        async def projects_list_ep(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from memory.project_registry import list_projects
+            return JSONResponse({"projects": list_projects()})
+
+        @app.post("/api/projects")
+        async def projects_add_ep(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from memory.project_registry import add_project
+            body = await req.json()
+            msg  = add_project(body.get("name", ""), body.get("path", ""))
+            return JSONResponse({"ok": msg.startswith(f"Project '{body.get('name', '')}' added"), "message": msg})
+
+        @app.delete("/api/projects/{name}")
+        async def projects_delete_ep(name: str, req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from memory.project_registry import remove_project
+            msg = remove_project(name)
+            return JSONResponse({"ok": msg.endswith("removed."), "message": msg})
+
+        @app.post("/api/projects/{name}/activate")
+        async def projects_activate_ep(name: str, req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from memory.project_registry import set_active
+            msg = set_active(name)
+            return JSONResponse({"ok": "Active project set" in msg, "message": msg})
+
+        @app.get("/api/steps")
+        async def steps_ep(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from core.step_bus import snapshot
+            return JSONResponse({"runs": snapshot()})
 
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 

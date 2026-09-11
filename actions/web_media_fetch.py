@@ -26,7 +26,6 @@ than downloaded — you get an actually-playing video without pretending to
 """
 import re
 import sys
-import time
 import uuid
 from pathlib import Path
 
@@ -140,7 +139,7 @@ def web_media_fetch(parameters: dict, player=None, speak=None) -> str:
             # A direct URL for video means "embed this page", same as a
             # search hit — we still don't download someone else's video file.
             _push(player, query or "VIDEO", "video", {"embed_url": url, "caption": query or url})
-            return f"Showing that video on the HUD now, sir."
+            return "Showing that video on the HUD now, sir."
         try:
             found = _search_video_embed(query)
         except Exception as e:

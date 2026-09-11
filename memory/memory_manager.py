@@ -265,6 +265,16 @@ def save_session_summary(summary: str, language: str = "") -> None:
     print(f"[Memory] 📝 Session saved ({entry['date']}): {summary[:60]}…")
 
 
+def peek_sessions() -> list:
+    """Read-only view of long_term.json['sessions'] — unlike
+    pop_last_session(), this does NOT consume the entries. Used by the
+    Remote Dashboard's Session tab to show recent session summaries
+    without affecting what LITE mentions in its next morning briefing."""
+    memory   = load_memory()
+    sessions = memory.get("sessions", [])
+    return sessions if isinstance(sessions, list) else []
+
+
 def pop_last_session() -> dict | None:
     """
     Return AND remove the most recent session entry.

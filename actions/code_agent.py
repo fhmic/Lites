@@ -62,6 +62,8 @@ from pathlib import Path
 
 import py_compile
 
+from core import step_bus
+
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -582,18 +584,29 @@ def code_agent(
     cfg = _load_config()
     timeout = int(p.get("timeout") or cfg.get("cline_timeout") or cfg.get("claude_code_timeout") or DEFAULT_TIMEOUT_S)
 
+    _run_box = {"id": None}   # set once a real run starts — see below
+
     def log(msg: str):
         print(f"[{AGENT_NAME}] {msg}")
         if player and hasattr(player, "write_log"):
             player.write_log(f"[{AGENT_NAME}] {msg}")
+        if _run_box["id"]:
+            step_bus.emit_step(_run_box["id"], msg)
 
-    def report(text: str) -> str:
+    def report(text: str, status: str = "error") -> str:
+        """Every return path in code_agent() goes through here — so this
+        is also the single place a tracked run gets closed out. status
+        defaults to 'error' since most call sites are failure/early-exit
+        messages; the two genuine success paths near the bottom of this
+        function pass status='ok' explicitly."""
         full = f"[{AGENT_NAME}] {text}"
         if player and hasattr(player, "show_content"):
             try:
                 player.show_content("CODE AGENT", full)
             except Exception:
                 pass
+        if _run_box["id"]:
+            step_bus.end_run(_run_box["id"], status)
         return full
 
     if not task:
@@ -605,12 +618,29 @@ def code_agent(
     # ── Resolve target directory ──────────────────────────────────────────
     if scope == "external":
         if not target:
-            return report("Tell me which project/folder to work in for an external task, sir.")
+            # No explicit target — fall back to whichever project is
+            # currently "active" in the Projects registry (see the Remote
+            # Dashboard's Projects tab / memory/project_registry.py),
+            # rather than making Felix repeat the full path every time.
+            active = None
+            try:
+                from memory.project_registry import get_active
+                active = get_active()
+            except Exception:
+                active = None
+            if active:
+                target = active[1]
+                log(f"No target given — using active project '{active[0]}' ({target}).")
+            else:
+                return report("Tell me which project/folder to work in for an external task, sir.")
         work_dir = Path(target).expanduser().resolve()
         if not work_dir.exists() or not work_dir.is_dir():
             return report(f"{work_dir} doesn't exist or isn't a folder, sir.")
     else:
         work_dir = BASE_DIR
+
+    # ── Start step tracking for this run (Remote Dashboard "Steps" tab) ────
+    _run_box["id"] = step_bus.start_run(f"[{scope}] {task}")
 
     # ── Preflight: git ─────────────────────────────────────────────────────
     if not _is_git_repo(work_dir):
@@ -640,11 +670,12 @@ def code_agent(
 
     # ── Preflight: Cline diagnostics ───────────────────────────────────────
     # Probe `cline --version` + `cline doctor` and report the resolved API
-    # endpoint, so that any failure later in the run has actionable context
-    # the user can read in the log instead of an opaque "Cline ran but left
-    # no changes".
+    # endpoint via log() as it runs, so any failure later in the run has
+    # actionable context the user can read in the log instead of an opaque
+    # "Cline ran but left no changes". The diagnostic text itself isn't
+    # needed here — _preflight_cline already streams it through `log`.
     log("Cline preflight:")
-    preflight = _preflight_cline(cfg, log)
+    _preflight_cline(cfg, log)
 
     # ── Checkpoint ───────────────────────────────────────────────────────────
     checkpoint = _ensure_checkpoint(work_dir, log)
@@ -690,25 +721,31 @@ def code_agent(
     # the provider proxy, etc.) instead of staring at a "left no changes"
     # verdict.
     lower = cli_output.lower()
+    # NOTE: this used to reference `final_message` before it existed (that
+    # name is only assigned below, by _verify_and_commit) — a genuine
+    # pre-existing bug that would raise UnboundLocalError the moment a
+    # connectivity-failure string showed up in cli_output. Fixed by testing
+    # `lower` (already computed from cli_output just above) instead, and by
+    # deferring the message append until final_message actually exists.
+    connectivity_note = None
     if (
         ("cannot connect to api" in lower or "unable to connect" in lower
          or "connection refused" in lower or "econnrefused" in lower
          or "etimedout" in lower or "network" in lower)
-        and "left no changes" in final_message.lower()
+        and "left no changes" in lower
     ):
         provider_hint = (
             (cfg.get("cline_base_url")
              or os.environ.get("CLINE_BASE_URL")
              or "Cline's currently-configured provider (set via `cline auth`)")
         )
-        final_message = (
-            final_message
-            + "\n\n[Code Agent] The Cline CLI ran but couldn't reach its model API. "
-              f"Resolved endpoint: {provider_hint}. "
-              "If that's a custom proxy, it's likely down — restart it, or re-run "
-              "`cline auth` to point Cline at a different provider. "
-              "If the endpoint looks right, run `cline doctor` from a terminal for "
-              "a fuller diagnostic."
+        connectivity_note = (
+            "\n\n[Code Agent] The Cline CLI ran but couldn't reach its model API. "
+            f"Resolved endpoint: {provider_hint}. "
+            "If that's a custom proxy, it's likely down — restart it, or re-run "
+            "`cline auth` to point Cline at a different provider. "
+            "If the endpoint looks right, run `cline doctor` from a terminal for "
+            "a fuller diagnostic."
         )
         log("Cline exit was an upstream API connectivity failure — not a code-task failure.")
 
@@ -716,6 +753,8 @@ def code_agent(
     changed, broken, commit_failed, final_message = _verify_and_commit(
         work_dir, checkpoint, task, cli_output, elapsed, timed_out, scope, log, report,
     )
+    if connectivity_note:
+        final_message += connectivity_note
 
     kind = _detect_failure_kind(
         cli_output,
@@ -727,7 +766,7 @@ def code_agent(
     )
 
     if kind == _FAILURE_OK:
-        return report(final_message)
+        return report(final_message, status="ok")
 
     # Cline is now the only executor, so we just hand the result back. A
     # future iteration may reintroduce a real fallback here; the

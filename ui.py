@@ -530,7 +530,7 @@ class HudWindow(QMainWindow):
         API_FILE.write_text(json.dumps(existing, indent=4), encoding="utf-8")
         self._assistant_name = name
         self._run_js(f"window.LiteHud && window.LiteHud.onAssistantName({json.dumps(name)})")
-        self._log_sig.emit(f"SYS: Assistant settings saved.")
+        self._log_sig.emit("SYS: Assistant settings saved.")
 
     def _on_vault_browse(self):
         path = QFileDialog.getExistingDirectory(self, "Select your Obsidian vault folder")

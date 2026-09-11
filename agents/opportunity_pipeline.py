@@ -265,7 +265,7 @@ def _comparison_report_text(focus: str, attempts: list[dict]) -> str:
     """Plain-text/markdown fallback of the same comparison — used when the
     result is served from cache or via voice/text-only paths that don't
     render the structured HUD table."""
-    header = f"No candidate fully cleared achievability + compliance + finance this round"
+    header = "No candidate fully cleared achievability + compliance + finance this round"
     header += f" for '{focus}'" if focus else ""
     header += f" — here are the top {len(attempts)} for your own call:\n"
 

@@ -29,46 +29,54 @@ class FakeProcess:
 
 class ProcessCleanupTest(unittest.TestCase):
     def test_code_agent_command_uses_user_template(self):
-        command = _command_template({"cline_command": ["cline.cmd", "-p", "{prompt}"]})
+        command = _command_template({"cline_command": ["cline.cmd", "--auto-approve", "true", "{prompt}"]})
 
         # User's cline_command list is the full override — should pass through
         # verbatim, no flags added or stripped by LITE.
-        self.assertEqual(command, ["cline.cmd", "-p", "{prompt}"])
+        self.assertEqual(command, ["cline.cmd", "--auto-approve", "true", "{prompt}"])
 
     def test_code_agent_command_falls_back_to_defaults(self):
         # No cline_command / cline_cli / env override → default template.
+        # Cline 3.x shape: prompt is a positional argument, --auto-approve
+        # takes a boolean value, no --no-session flag exists in current Cline.
         command = _command_template({})
 
-        self.assertEqual(len(command), 5)
         self.assertEqual(command[0], "cline.cmd" if os.name == "nt" else "cline")
-        self.assertEqual(command[1], "-p")
-        self.assertEqual(command[2], "{prompt}")
-        self.assertIn("--no-session", command)
         self.assertIn("--auto-approve", command)
+        self.assertIn("true", command)
+        self.assertIn("{prompt}", command)
 
     def test_code_agent_command_uses_cline_cli_override(self):
         command = _command_template({"cline_cli": "/custom/path/to/cline"})
 
         self.assertEqual(command[0], "/custom/path/to/cline")
-        self.assertIn("--no-session", command)
         self.assertIn("--auto-approve", command)
+        self.assertIn("{prompt}", command)
 
     def test_code_agent_minimal_template_strips_user_overrides(self):
+        # User's full template can include any of Cline 3.x's optional
+        # flags (--model, --system, --provider, --thinking, etc.) — the
+        # minimal retry template must drop them and keep only what makes
+        # Cline run non-interactively in act mode.
         command = _minimal_command_template(
-            ["cline.cmd", "-p", "{prompt}", "--model", "bad", "--system-prompt", "evil", "--no-session", "--auto-approve"]
+            ["cline.cmd", "--auto-approve", "true", "{prompt}",
+             "--model", "bad", "--system", "evil", "--provider", "openrouter",
+             "--thinking", "high", "--cwd", "C:\\proj"]
         )
 
-        # Non-essential flags get dropped, but the executable and the
-        # headless / auto-approve switches must stay so Cline still runs
-        # non-interactively.
+        # Non-essential flags get dropped, but the executable, the auto-
+        # approve switch, and the {prompt} placeholder must stay.
         self.assertNotIn("--model", command)
         self.assertNotIn("bad", command)
-        self.assertNotIn("--system-prompt", command)
+        self.assertNotIn("--system", command)
         self.assertNotIn("evil", command)
-        self.assertIn("-p", command)
+        self.assertNotIn("--provider", command)
+        self.assertNotIn("openrouter", command)
+        self.assertNotIn("--thinking", command)
+        self.assertNotIn("--cwd", command)
         self.assertIn("{prompt}", command)
-        self.assertIn("--no-session", command)
         self.assertIn("--auto-approve", command)
+        self.assertIn("true", command)
 
     def test_code_agent_minimal_template_rebuilds_when_template_empty(self):
         # If the user's template lost the executable or the headless
@@ -77,10 +85,9 @@ class ProcessCleanupTest(unittest.TestCase):
         command = _minimal_command_template(["cline.cmd"])
 
         self.assertEqual(command[0], "cline.cmd")
-        self.assertIn("-p", command)
         self.assertIn("{prompt}", command)
-        self.assertIn("--no-session", command)
         self.assertIn("--auto-approve", command)
+        self.assertIn("true", command)
 
     def test_cleanup_reports_candidates_without_confirmation(self):
         chrome = FakeProcess(101, "chrome.exe", 900)

@@ -17,7 +17,6 @@ pynput's format: https://pynput.readthedocs.io/en/latest/keyboard.html#global-ho
 """
 import json
 import sys
-import threading
 from pathlib import Path
 
 

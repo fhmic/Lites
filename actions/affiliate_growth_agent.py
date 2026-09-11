@@ -716,7 +716,8 @@ def _handle_edit_draft(p: dict) -> str:
     except Exception as e:
         return f"Couldn't save that edit: {e}"
     item = result.get("item", {})
-    return f"Saved your edit to draft [{item_id}] — still pending your approval."
+    title_note = f" — \"{item['title']}\"" if item.get("title") else ""
+    return f"Saved your edit to draft [{item_id}]{title_note} — still pending your approval."
 
 
 def _handle_approve_draft(p: dict) -> str:

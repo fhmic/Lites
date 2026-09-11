@@ -157,6 +157,13 @@ def _do_statement_interpretation(p: dict, player=None, speak=None) -> str:
     if error:
         return error
 
+    # NOTE: _gather_statement_text() has its own local `file_path` — not
+    # visible here. This was previously referenced bare below (undefined
+    # name — a real NameError the moment a file-based statement produced
+    # no extractable figures), so it's re-derived from `p` the same way
+    # _gather_statement_text() does.
+    file_path = (p.get("file_path") or "").strip()
+
     context = (p.get("context") or "").strip()
     ask = (p.get("description") or "").strip()
 
@@ -625,6 +632,66 @@ _ACTIONS_WITH_IO = {
     "statement_interpretation": _do_statement_interpretation,
 }
 
+# Keyword banks for _infer_action — deliberately narrow (specific financial
+# terms only) so a vague message doesn't get misrouted; "analyze this" with
+# nothing else stays on the safe investment_appraisal fallback, which itself
+# just asks a clarifying question rather than guessing.
+_STATEMENT_KEYWORDS = (
+    "ratio", "income statement", "balance sheet", "cash flow statement",
+    "cashflow statement", "profit and loss", "p&l", "financial statement",
+    "financial report", "trial balance", "liquidity", "solvency",
+    "profitability", "leverage", "gross margin", "net margin",
+)
+_INVESTMENT_KEYWORDS = (
+    "npv", "irr", "mirr", "payback period", "discount rate", "arr",
+    "profitability index",
+)
+_MARKET_KEYWORDS   = ("market research", "interest rate", "t-bill", "treasury bill", "mpr", "bond", "money market")
+_MA_KEYWORDS       = ("merger", "acquisition", "m&a", "valuation")
+_TAX_KEYWORDS      = ("tax", "regulatory", "levy", "compliance")
+_OPPORTUNITY_WORDS = ("opportunity", "business idea", "venture", "should i start")
+
+
+def _infer_action(p: dict) -> str:
+    """Explicit action always wins. Otherwise infer from what was actually
+    given, in order of how unambiguous the signal is:
+      1. A file/pasted statement was handed over -> statement_interpretation.
+         This is deliberately checked FIRST and independent of keywords —
+         uploading a financial report and asking to "analyze" or "look at"
+         it (no ratio/statement keyword at all) is the single most common
+         real-world entry point, and used to silently fall through to
+         investment_appraisal (which needs cashflows, not a file) and
+         immediately error out asking for a cashflow list instead.
+      2. Explicit cashflows given -> investment_appraisal.
+      3. A keyword pass over the free-text description.
+    Falls back to investment_appraisal only when nothing above matched —
+    same behavior as before for a truly bare/ambiguous request, where it
+    asks a clarifying question rather than guessing wrong."""
+    action = (p.get("action") or "").strip().lower()
+    if action:
+        return action
+
+    if p.get("file_path") or p.get("statement_text"):
+        return "statement_interpretation"
+
+    if p.get("cashflows"):
+        return "investment_appraisal"
+
+    text = (p.get("description") or "").lower()
+    if any(w in text for w in _STATEMENT_KEYWORDS):
+        return "statement_interpretation"
+    if any(w in text for w in _INVESTMENT_KEYWORDS):
+        return "investment_appraisal"
+    if any(w in text for w in _MARKET_KEYWORDS):
+        return "market_research"
+    if any(w in text for w in _MA_KEYWORDS):
+        return "ma_advisory"
+    if any(w in text for w in _TAX_KEYWORDS):
+        return "tax_regulatory"
+    if any(w in text for w in _OPPORTUNITY_WORDS):
+        return "opportunity_appraisal"
+    return "investment_appraisal"
+
 
 def fta_agent(
     parameters:     dict,
@@ -638,7 +705,7 @@ def fta_agent(
     are built so far — other actions return an honest 'not built yet'
     rather than guessing."""
     p = parameters or {}
-    action = (p.get("action") or "investment_appraisal").strip().lower()
+    action = _infer_action(p)
 
     if action in _ACTIONS_WITH_IO:
         try:

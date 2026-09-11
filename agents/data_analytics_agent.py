@@ -37,6 +37,22 @@ import re
 
 AGENT_NAME = "Data Analytics Agent"
 
+# Keyword bank kept intentionally narrow — same principle as
+# fta_agent._STATEMENT_KEYWORDS (in fact literally shares that list): only
+# route into real ratio analysis on an unambiguous financial-statement
+# signal, never guess on a generic "analyze this spreadsheet" ask.
+_STATEMENT_KEYWORDS = (
+    "ratio", "income statement", "balance sheet", "cash flow statement",
+    "cashflow statement", "profit and loss", "p&l", "financial statement",
+    "financial report", "trial balance", "liquidity", "solvency",
+    "profitability", "leverage", "gross margin", "net margin",
+)
+
+
+def _looks_like_financial_statement(p: dict) -> bool:
+    text = " ".join(str(p.get(k, "")) for k in ("description", "query", "file_path")).lower()
+    return any(w in text for w in _STATEMENT_KEYWORDS)
+
 
 def _report(body: str) -> str:
     return f"[{AGENT_NAME}] {body}"
@@ -123,6 +139,21 @@ def _do_tasks_overview(p: dict) -> str:
 def _do_analyze_file(p: dict, player=None, speak=None) -> str:
     if not p.get("file_path"):
         return "Which file should I analyze?"
+
+    # A financial-statement-shaped upload (income statement, balance sheet,
+    # ratio analysis, etc.) gets real accounting treatment — figure
+    # extraction + deterministic ratio computation via
+    # agents/fta_agent.py -> agents/financial_ratios.py — instead of the
+    # generic "here's what's in this spreadsheet" AI-prose summary below,
+    # which was never actual ratio analysis and used to be the only thing
+    # a financial-report upload got back from this agent. file_action is
+    # an explicit escape hatch: if the caller specifically asked for the
+    # generic stats/info/filter view of the file, that request is honored
+    # as-is rather than overridden.
+    if not p.get("file_action") and _looks_like_financial_statement(p):
+        from agents.fta_agent import _do_statement_interpretation
+        return _do_statement_interpretation(p, player=player, speak=speak)
+
     fp_params = {**p, "action": p.get("file_action") or "analyze"}
     return file_processor(parameters=fp_params, player=player, speak=speak)
 

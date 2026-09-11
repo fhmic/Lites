@@ -69,6 +69,16 @@ class AllProvidersFailedError(Exception):
     pass
 
 
+def _record_usage(provider: str, prompt: str, text: str) -> None:
+    """Best-effort call into core/usage_tracker.py — feeds the Remote
+    Dashboard's Usage tab. Never allowed to affect the actual response."""
+    try:
+        from core.usage_tracker import record
+        record(provider, prompt, text)
+    except Exception:
+        pass
+
+
 class _Response:
     """Minimal shape-compatible stand-in for a google-genai response — just
     the `.text` attribute every call site already reads."""
@@ -218,7 +228,9 @@ def generate_content(prompt: str, model: str = DEFAULT_GEMINI_MODEL) -> _Respons
     errors: list[str] = []
 
     try:
-        return _Response(_try_gemini(prompt, model), "gemini")
+        text = _try_gemini(prompt, model)
+        _record_usage("gemini", prompt, text)
+        return _Response(text, "gemini")
     except Exception as e:
         err_str = str(e)
         # Don't cool down for a config issue (no key set — that's not
@@ -232,17 +244,23 @@ def generate_content(prompt: str, model: str = DEFAULT_GEMINI_MODEL) -> _Respons
         print(f"[AIClient] ⚠️ Gemini failed ({e}) — trying fallback...")
 
     try:
-        return _Response(_try_claude(prompt), "claude")
+        text = _try_claude(prompt)
+        _record_usage("claude", prompt, text)
+        return _Response(text, "claude")
     except Exception as e:
         errors.append(f"Claude: {e}")
 
     try:
-        return _Response(_try_groq(prompt), "groq")
+        text = _try_groq(prompt)
+        _record_usage("groq", prompt, text)
+        return _Response(text, "groq")
     except Exception as e:
         errors.append(f"Groq: {e}")
 
     try:
-        return _Response(_try_custom(prompt), "custom")
+        text = _try_custom(prompt)
+        _record_usage("custom", prompt, text)
+        return _Response(text, "custom")
     except Exception as e:
         errors.append(f"Custom endpoint: {e}")
 
