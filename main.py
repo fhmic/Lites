@@ -16,42 +16,141 @@ if _sys.stdout is None or _sys.stderr is None:
     from datetime import datetime as _datetime
     print(f"\n{'=' * 60}\nLITE starting (no console attached) — {_datetime.now()}\n{'=' * 60}")
 
+# Force UTF-8 on stdout/stderr in every launch mode. pythonw already gets a
+# UTF-8 log file above; but when LITE runs with a console or is piped, the
+# default encoding is the machine's legacy codepage (cp1252 on most Western
+# installs), and the codebase prints emoji/status glyphs everywhere — one
+# unencodable character inside an error handler would itself crash the task
+# handling the error (seen as UnicodeEncodeError under unittest's pipe).
+# errors="replace" guarantees a print can never take down a thread.
+for _stream in (_sys.stdout, _sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass  # exotic stream without reconfigure — best-effort only
+
 # ── Single-instance guard ─────────────────────────────────────────────────
 # Prevents a second launch (e.g. an accidental double-click on the icon)
 # from opening a duplicate UI. Runs before the heavy imports below so a
 # duplicate launch exits almost instantly instead of loading Gemini/audio/
-# agent modules first. Uses a bound loopback-only TCP socket as the lock —
-# no extra dependencies, and the OS releases it automatically on exit or
-# crash (no stale-lock cleanup needed, unlike a lock file).
+# agent modules first.
+#
+# Windows: the authoritative check is a named mutex created via
+# kernel32.CreateMutexW — the canonical single-instance mechanism there,
+# immune to port re-use quirks. (This guard used to be socket-only and set
+# SO_REUSEADDR before bind — but on Windows that flag lets a second socket
+# bind the same port that is already listening, so the duplicate launch
+# silently succeeded and two full LITE instances ran at once, fighting over
+# the microphone and dashboard. SO_REUSEADDR is gone; the mutex decides.)
+# The loopback TCP socket below is now only the "raise my window" channel:
+# a duplicate pings it so the running instance pops to the foreground. If
+# some unrelated app happens to own that port, LITE still starts (the mutex
+# is authoritative) — later clicks just can't raise the window.
+import os as _os
 import socket as _socket
 
 _SINGLE_INSTANCE_PORT = 51477  # arbitrary, LITE-specific, loopback-only
 _single_instance_socket = None
+_single_instance_mutex  = None
+_SINGLE_INSTANCE_MUTEX_NAME = "Local\\LITE.SingleInstance.Mutex"
+
+def _ping_raising_instance() -> None:
+    """Best-effort: tell the running instance to raise its window."""
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as client:
+            client.settimeout(1)
+            client.connect(("127.0.0.1", _SINGLE_INSTANCE_PORT))
+            client.sendall(b"raise")
+    except OSError:
+        pass  # stale/unreachable owner — nothing more we can do
+
+def _try_acquire_windows_mutex() -> bool:
+    """Windows: create/own LITE's named mutex. Returns False — without
+    keeping ownership — if another LITE instance already owns it."""
+    global _single_instance_mutex
+    import ctypes as _ctypes
+    try:
+        kernel32     = _ctypes.WinDLL("kernel32", use_last_error=True)
+        create_mutex = kernel32.CreateMutexW
+        create_mutex.argtypes = [_ctypes.c_void_p, _ctypes.c_int, _ctypes.c_wchar_p]
+        create_mutex.restype  = _ctypes.c_void_p
+        close_handle          = kernel32.CloseHandle
+        close_handle.argtypes = [_ctypes.c_void_p]
+        close_handle.restype  = _ctypes.c_int
+    except Exception:
+        # ctypes config failed (never expected on Windows) — don't block
+        # startup; the socket path below still provides a best-effort check.
+        return True
+    handle = create_mutex(None, 1, _SINGLE_INSTANCE_MUTEX_NAME)
+    if not handle:
+        # Couldn't create (permissions?) — don't block startup.
+        return True
+    if _ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        close_handle(handle)  # someone else owns it — give our handle back
+        return False
+    # Owned for the process lifetime; the OS releases it automatically on
+    # exit or crash (no stale-lock cleanup needed).
+    _single_instance_mutex = handle
+    return True
 
 def _acquire_single_instance_lock() -> bool:
     """Returns True if this is the only running instance. If another
     instance already holds the lock, pings it (so it can raise its
     window) and returns False so the caller can exit immediately."""
     global _single_instance_socket
+    if _os.environ.get("LITE_ALLOW_MULTI_INSTANCE"):
+        return True  # escape hatch for tests / deliberate parallel runs
+
+    # 1) Windows mutex — the authoritative duplicate check.
+    if _sys.platform == "win32" and not _try_acquire_windows_mutex():
+        _ping_raising_instance()
+        return False
+
+    # 2) Loopback socket — the "raise window" channel (and, on non-Windows
+    #    systems, the single-instance lock itself).
     s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-    s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
     try:
+        # Deliberately NO SO_REUSEADDR: on Windows it would let a second
+        # socket steal this port from the running instance (the bug that
+        # let duplicates launch). A plain bind fails if the port is held.
         s.bind(("127.0.0.1", _SINGLE_INSTANCE_PORT))
         s.listen(1)
     except OSError:
-        # Another instance already owns this port — ping it, then bail out.
-        try:
-            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as client:
-                client.settimeout(1)
-                client.connect(("127.0.0.1", _SINGLE_INSTANCE_PORT))
-                client.sendall(b"raise")
-        except OSError:
-            pass  # stale/unreachable owner — nothing more we can do
         s.close()
+        if _sys.platform == "win32":
+            # The mutex says we're first, so the port is held by an
+            # unrelated app (or TIME_WAIT leftovers from a previous crash).
+            # Start anyway without the raise channel — duplicates still
+            # can't launch because the mutex blocks them.
+            _single_instance_socket = None
+            return True
+        # Non-Windows: the socket WAS the lock.
+        _ping_raising_instance()
         return False
 
     _single_instance_socket = s  # kept open for the process lifetime
     return True
+
+def _release_single_instance_lock() -> None:
+    """Drops both lock primitives. Only needed by tests — normal exits rely
+    on the OS releasing the socket and mutex handle automatically."""
+    global _single_instance_socket, _single_instance_mutex
+    if _single_instance_socket is not None:
+        try:
+            _single_instance_socket.close()
+        except OSError:
+            pass
+        _single_instance_socket = None
+    if _single_instance_mutex is not None and _sys.platform == "win32":
+        try:
+            import ctypes as _ctypes
+            _ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(
+                _single_instance_mutex
+            )
+        except Exception:
+            pass
+        _single_instance_mutex = None
 
 if not _acquire_single_instance_lock():
     print("[LITE] Another instance is already running — raising it and exiting.")
@@ -83,6 +182,7 @@ import time
 import json
 import sys
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -196,6 +296,15 @@ RECEIVE_SAMPLE_RATE = 24000
 # 2048 is the sweet spot for first-byte response on a real-time audio stream.
 CHUNK_SIZE          = 2048
 INPUT_AUDIO_MIME    = "audio/pcm;rate=16000"
+# Speaker echo guard: after LITE stops speaking, keep ignoring mic input for
+# this long. Laptop speakers leak LITE's own voice back into the microphone,
+# and Gemini's server-side VAD then hears "the user" mid-sentence, interrupts
+# LITE's speech and flips the session LISTENING↔SPEAKING until the turn falls
+# apart (the "keeps breaking and switching intermittently" bug). Short enough
+# that real replies feel immediate; long enough to absorb tail echo/reverb.
+# Barge-in is unaffected — the stop button / global hotkey / remote all go
+# through interrupt(), which reopens the mic instantly.
+ECHO_GUARD_S        = 0.35
 
 def _get_api_key() -> str:
     """
@@ -208,6 +317,17 @@ def _get_api_key() -> str:
             return (json.load(f).get("gemini_api_key") or "").strip()
     except Exception:
         return ""
+
+
+def _echo_cancellation_enabled() -> bool:
+    """Whether the mic should stay open while LITE speaks using real echo
+    cancellation (voice barge-in). Default true; set "echo_cancellation":
+    false in api_keys.json to fall back to muting the mic while speaking."""
+    try:
+        with open(API_CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+            return bool(json.load(f).get("echo_cancellation", True))
+    except Exception:
+        return True
 
 
 def _load_system_prompt() -> str:
@@ -551,12 +671,19 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "file_controller",
-        "description": "Manages files and folders: list, create, delete, move, copy, rename, read, write, find, disk usage.",
+        "description": (
+            "Manages files and folders: list, create, delete, move, copy, rename, "
+            "read, write, find, disk usage. For create_file/write/create_folder: if "
+            "`path` is omitted, this now defaults to the user's configured Obsidian "
+            "vault (if one is set up) rather than guessing a folder — so leave `path` "
+            "unset for a generic 'create/save a file' request unless the user named a "
+            "specific location. `path` also accepts \"obsidian\"/\"vault\" explicitly."
+        ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "action":      {"type": "STRING", "description": "list | create_file | create_folder | delete | move | copy | rename | read | write | find | largest | disk_usage | organize_desktop | info"},
-                "path":        {"type": "STRING", "description": "File/folder path or shortcut: desktop, downloads, documents, home"},
+                "path":        {"type": "STRING", "description": "File/folder path or shortcut: desktop, downloads, documents, home, obsidian/vault (the user's configured Obsidian vault, if any)"},
                 "destination": {"type": "STRING", "description": "Destination path for move/copy"},
                 "new_name":    {"type": "STRING", "description": "New name for rename"},
                 "content":     {"type": "STRING", "description": "Content for create_file/write"},
@@ -1117,8 +1244,8 @@ TOOL_DECLARATIONS = [
                 "description": (
                     "What to do with the file. Examples by type:\n"
                     "image: describe | ocr | resize | compress | convert | info\n"
-                    "pdf: summarize | extract_text | to_word | info\n"
-                    "docx/txt: summarize | fix | reformat | translate_hint | word_count | to_bullet\n"
+                    "pdf: summarize | read | extract_text | to_word | info\n"
+                    "docx/txt: summarize | read | fix | reformat | translate_hint | word_count | to_bullet\n"
                     "csv/excel: analyze | stats | filter | sort | convert | info\n"
                     "json: validate | format | analyze | to_csv\n"
                     "code: explain | review | fix | optimize | run | document | test\n"
@@ -1128,7 +1255,7 @@ TOOL_DECLARATIONS = [
                     "AND a summary in one pass, using native video+audio understanding — use 'summarize' "
                     "whenever the user wants both, or just wants to know what a video covers)\n"
                     "archive: list | extract\n"
-                    "pptx: summarize | extract_text | analyze"
+                    "pptx: summarize | read | extract_text | analyze"
                 )
             },
             "instruction": {
@@ -1206,6 +1333,18 @@ class LiteLive:
         self.session              = None
         self.audio_in_queue       = None
         self.out_queue            = None
+        # Dedicated, small thread pool exclusively for the real-time output-
+        # stream write in _play_audio(). Every tool call (open_app,
+        # browser_control, code_agent, screen_process, etc.) runs via
+        # loop.run_in_executor(None, ...) — Python's DEFAULT executor —
+        # and asyncio.to_thread() used to draw from that exact same shared
+        # pool for the audio write. A long-running tool call (code_agent in
+        # particular can run for minutes) occupying a worker could delay the
+        # time-critical stream.write() call queued right behind it, causing
+        # an audible dropout/"break" mid-sentence. Isolating audio output
+        # onto its own pool removes that contention entirely regardless of
+        # what else is running.
+        self._audio_out_executor  = ThreadPoolExecutor(max_workers=2, thread_name_prefix="LiteAudioOut")
         self._loop                = None
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
@@ -1218,6 +1357,9 @@ class LiteLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        self._speech_ended_at      = 0.0     # monotonic time LITE last stopped speaking (echo guard)
+        self._aec                  = None    # EchoCanceller (voice barge-in); created lazily in _listen_audio
+        self._aec_notice_sent      = False   # the barge-in capability is logged only once
         self.ui.on_text_command   = self._on_text_command
         self.ui.on_remote_clicked = self._make_remote_key
         self.ui.on_interrupt      = self.interrupt
@@ -1274,10 +1416,40 @@ class LiteLive:
     def set_speaking(self, value: bool):
         with self._speaking_lock:
             self._is_speaking = value
+            if not value:
+                # Stamp when speech ended — the echo guard (_mic_capture_allowed)
+                # keeps mic frames out of the session for a short tail window
+                # after this, so speaker echo can't trigger Gemini's VAD.
+                self._speech_ended_at = time.monotonic()
         if value:
             self.ui.set_state("SPEAKING")
         elif not self.ui.muted:
             self.ui.set_state("LISTENING")
+
+    def _mic_capture_allowed(self) -> bool:
+        """True when mic frames should stream to Gemini right now.
+
+        Two modes:
+        - Echo cancellation active (self._aec): the mic stays OPEN even while
+          LITE speaks — the canceller subtracts LITE's own voice from the
+          capture, so Gemini's VAD only ever sees the real user. This is
+          what enables true voice barge-in (interrupting LITE by talking).
+        - No echo cancellation: capture is gated while LITE speaks (plus a
+          short tail window — ECHO_GUARD_S). Without it, speaker echo
+          re-enters the mic, Gemini's VAD hears "the user" mid-sentence and
+          LITE interrupts itself — the flip-flopping "broken conversation"
+          bug. Barge-in then happens through the stop button, the global
+          mute hotkey, and the remote dashboard, which all call interrupt()
+          → set_speaking(False) and reopen the mic instantly.
+        """
+        if self.ui.muted or self._phone_active:
+            return False
+        with self._speaking_lock:
+            speaking   = self._is_speaking
+            ended_at   = self._speech_ended_at
+        if speaking:
+            return getattr(self, "_aec", None) is not None
+        return (time.monotonic() - ended_at) >= ECHO_GUARD_S
 
     def interrupt(self) -> None:
         """Stop LITE mid-speech: drain queued audio and open mic immediately."""
@@ -1683,13 +1855,62 @@ class LiteLive:
             self.out_queue.put_nowait(item)
 
     async def _send_realtime(self):
+        consecutive_failures = 0
+        last_logged = 0.0
         while True:
             msg = await self.out_queue.get()
-            await self.session.send_realtime_input(media=msg)
+            try:
+                await self.session.send_realtime_input(media=msg)
+                consecutive_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # A transient blip (one bad websocket write, a hiccup while a
+                # tool call is mid-flight) must NOT tear the whole Live
+                # session down — that used to turn a single dropped frame
+                # into a full mid-conversation reconnect. Drop the frame and
+                # carry on; _receive_audio raises separately if the session
+                # is genuinely dead. Only sustained failure escalates.
+                consecutive_failures += 1
+                now = time.monotonic()
+                if now - last_logged > 5.0:
+                    print(f"[LITE] ⚠️ send_realtime failed ({e}) — frame dropped")
+                    last_logged = now
+                if consecutive_failures >= 10:
+                    raise  # session is dead — let the reconnect logic take over
 
     async def _listen_audio(self):
         print("[LITE] 🎤 Mic started")
         loop = asyncio.get_event_loop()
+
+        # Echo cancellation (voice barge-in) — created once per process,
+        # before the mic stream opens. Config-gated via "echo_cancellation"
+        # in api_keys.json (default true). Missing/failing pyaec just means
+        # the echo guard keeps the mic shut while LITE speaks (button
+        # interrupt only) — nothing else changes.
+        if self._aec is None and not self._aec_notice_sent:
+            self._aec_notice_sent = True
+            if _echo_cancellation_enabled():
+                try:
+                    from core.echo_canceller import EchoCanceller, aec_available
+                    if aec_available():
+                        self._aec = EchoCanceller()
+                        self.ui.write_log(
+                            "SYS: Echo cancellation active — you can interrupt me by voice."
+                        )
+                    else:
+                        self.ui.write_log(
+                            "SYS: Voice barge-in unavailable (install 'pyaec') — use the stop button to interrupt."
+                        )
+                except Exception as e:
+                    print(f"[LITE] ⚠️ Echo canceller init failed: {e}")
+                    self.ui.write_log(
+                        "SYS: Voice barge-in unavailable — use the stop button to interrupt."
+                    )
+            else:
+                self.ui.write_log(
+                    "SYS: Echo cancellation disabled in settings — use the stop button to interrupt."
+                )
 
         def enqueue_mic_audio(data):
             """Keep the freshest mic input and discard stale packets when the queue is full."""
@@ -1698,31 +1919,52 @@ class LiteLive:
         def callback(indata, frames, time_info, status):
             if status:
                 print(f"[LITE] ⚠️ Mic status: {status}")
-            if not self.ui.muted and not self._phone_active:
-                data = resample_audio(
-                    indata[:, input_channel], input_rate, SEND_SAMPLE_RATE
-                ).tobytes()
-                loop.call_soon_threadsafe(enqueue_mic_audio, data)
+            # Gating: open whenever allowed — with echo cancellation that
+            # includes while LITE is speaking (true barge-in); without it,
+            # frames are dropped while speaking (see _mic_capture_allowed).
+            if not self._mic_capture_allowed():
+                return
+            data = resample_audio(
+                indata[:, input_channel], input_rate, SEND_SAMPLE_RATE
+            )
+            if self._aec is not None:
+                try:
+                    cleaned = self._aec.process_mic(data.tobytes())
+                    data = np.frombuffer(cleaned, dtype=np.int16)
+                except Exception as e:
+                    print(f"[LITE] ⚠️ Echo cancellation skipped a frame: {e}")
+            loop.call_soon_threadsafe(enqueue_mic_audio, data.tobytes())
 
+        # Log mic state only on TRANSITIONS, not on every 1-second retry: an
+        # unstable device (Windows audio engine restart, another app grabbing
+        # the array, a duplicate instance) used to spam "unavailable" into
+        # the activity log every second while it recovered on its own.
+        mic_was_up = None  # None = unknown — log the first state unconditionally
         while True:
             try:
                 input_device, input_rate = resolve_input_stream(SEND_SAMPLE_RATE)
                 input_channel = input_channel_index(input_device)
-                print(f"[LITE] 🎤 Input device: {input_device_name(input_device)}")
                 with sd.InputStream(
                     device=input_device,
                     samplerate=input_rate,
                     channels=max(CHANNELS, input_channel + 1),
                     dtype="int16",
                     blocksize=CHUNK_SIZE,
+                    latency="high",   # see _play_audio()'s latency="high" comment — same jitter-tolerance reasoning applies to capture
                     callback=callback,
                 ):
+                    print(f"[LITE] 🎤 Input device: {input_device_name(input_device)}")
                     print("[LITE] 🎤 Mic stream open")
+                    if mic_was_up is not True:
+                        mic_was_up = True
+                        self.ui.write_log("SYS: Laptop microphone active.")
                     while True:
                         await asyncio.sleep(0.1)
             except Exception as e:
                 print(f"[LITE] ❌ Mic stream lost: {e}; retrying")
-                self.ui.write_log("ERR: Laptop microphone unavailable — retrying.")
+                if mic_was_up is not False:
+                    mic_was_up = False
+                    self.ui.write_log("ERR: Laptop microphone unavailable — retrying.")
                 await asyncio.sleep(1)
 
     async def _receive_audio(self):
@@ -1885,9 +2127,17 @@ class LiteLive:
             channels=CHANNELS,
             dtype="int16",
             blocksize=CHUNK_SIZE,
+            # 'high' asks PortAudio for a larger internal buffer than the
+            # driver's low-latency default — trades a small amount of extra
+            # end-to-end delay (typically well under 200ms) for much more
+            # tolerance of scheduling jitter (GC pauses, other threads,
+            # HUD rendering), which is what was producing audible
+            # dropouts/"breaks" mid-sentence under any load.
+            latency="high",
         )
         stream.start()
 
+        loop = asyncio.get_event_loop()
         try:
             while True:
                 try:
@@ -1918,9 +2168,28 @@ class LiteLive:
                         break
 
                 try:
-                    await asyncio.to_thread(stream.write, bytes(batch))
+                    # Runs on _audio_out_executor (see __init__), NOT the
+                    # shared default executor every tool call also uses —
+                    # see the comment there for why that separation matters.
+                    _out_bytes = bytes(batch)
+                    await loop.run_in_executor(self._audio_out_executor, stream.write, _out_bytes)
                 except (RuntimeError, asyncio.CancelledError):
                     break   # executor shutting down — exit cleanly
+                if self._aec is not None:
+                    try:
+                        # Feed the canceller what actually went to the
+                        # speakers (downsampled to the mic's 16 kHz) — that
+                        # reference is what lets it subtract LITE's own
+                        # voice from the mic capture (voice barge-in).
+                        self._aec.push_reference(
+                            resample_audio(
+                                np.frombuffer(_out_bytes, dtype=np.int16),
+                                RECEIVE_SAMPLE_RATE,
+                                SEND_SAMPLE_RATE,
+                            ).tobytes()
+                        )
+                    except Exception:
+                        pass  # a dropped reference frame just weakens cancellation briefly
         except Exception as e:
             print(f"[LITE] ❌ Play: {e}")
             raise
@@ -2140,13 +2409,44 @@ class LiteLive:
         except Exception as e:
             print(f"[Obsidian] ⚠️ Auto-journal failed: {e}")
 
+    async def _supervise(self, label: str, coro) -> None:
+        """Shield for helper tasks that share the Live TaskGroup with the
+        audio pipeline. If any of them raises, the TaskGroup cancels
+        mic/_listen_audio/_receive_audio/_play_audio and forces a
+        mid-conversation reconnect — which sounded like LITE 'breaking'
+        while speaking. Their loops now swallow per-iteration errors; this
+        catches whatever still escapes so the worst case is a stopped
+        helper, never a broken voice session."""
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[{label}] ⚠️ Background task stopped: {e}")
+
     # ── System monitor ──────────────────────────────────────────────────────────
 
     async def _run_system_monitor(self) -> None:
-        """Background task: voice alerts when metrics exceed thresholds."""
+        """Background task: voice alerts when metrics exceed thresholds.
+
+        Errors are swallowed per-cycle: this loop shares the Live TaskGroup
+        with the mic/receive/play tasks, so anything raised here used to tear
+        the whole voice session down mid-conversation (seen in the console
+        log as an ExceptionGroup + surprise "Reconnecting in 3s...")."""
         while True:
             await asyncio.sleep(10)
-            alert = await asyncio.to_thread(self._sys_monitor.check)
+            try:
+                alert = await asyncio.to_thread(self._sys_monitor.check)
+            except asyncio.CancelledError:
+                raise
+            except RuntimeError as e:
+                if "cannot schedule new futures after shutdown" in str(e):
+                    return  # event loop shutting down (window closed) — exit quietly
+                print(f"[Monitor] ⚠️ System check failed: {e}")
+                continue
+            except Exception as e:
+                print(f"[Monitor] ⚠️ System check failed: {e}")
+                continue
             if not alert or not self.session:
                 continue
             # Don't interrupt an active conversation
@@ -2209,17 +2509,20 @@ class LiteLive:
             if not self.session:
                 continue
 
-            with self._speaking_lock:
-                speaking = self._is_speaking
-            if speaking:
-                continue
-
-            if not self._proactive.should_trigger(self._last_user_speech):
-                continue
-
-            self._proactive.mark_triggered()
-
+            # Per-cycle error swallowing — same reasoning as
+            # _run_system_monitor: a transient failure here must never cancel
+            # the mic/receive/play tasks that share this TaskGroup.
             try:
+                with self._speaking_lock:
+                    speaking = self._is_speaking
+                if speaking:
+                    continue
+
+                if not self._proactive.should_trigger(self._last_user_speech):
+                    continue
+
+                self._proactive.mark_triggered()
+
                 memory       = await asyncio.to_thread(load_memory)
                 monitors     = await asyncio.to_thread(list_monitors)
                 recent_turns = self._session_log[-8:] if self._session_log else []
@@ -2234,6 +2537,12 @@ class LiteLive:
                     turn_complete=True,
                 )
                 self.ui.write_log("SYS: Proactive check-in.")
+            except asyncio.CancelledError:
+                raise
+            except RuntimeError as e:
+                if "cannot schedule new futures after shutdown" in str(e):
+                    return  # event loop shutting down (window closed) — exit quietly
+                print(f"[Proactive] ⚠️ {e}")
             except Exception as e:
                 print(f"[Proactive] ⚠️ {e}")
 
@@ -2610,9 +2919,12 @@ class LiteLive:
                     tg.create_task(self._listen_audio())
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
-                    tg.create_task(self._run_system_monitor())
-                    tg.create_task(self._run_background_monitor())
-                    tg.create_task(self._run_proactive_mode())
+                    # Helper loops run shielded — see _supervise(). A hiccup in
+                    # any of them must never cancel the audio tasks above
+                    # (that was the mid-speech "breaks and reconnects" bug).
+                    tg.create_task(self._supervise("SystemMonitor", self._run_system_monitor()))
+                    tg.create_task(self._supervise("BackgroundMonitor", self._run_background_monitor()))
+                    tg.create_task(self._supervise("Proactive", self._run_proactive_mode()))
                     # _relay_phone_audio is NOT started here — it's a
                     # top-level task started once in run(), independent of
                     # this Live session's lifetime (see comment there).
@@ -2620,7 +2932,7 @@ class LiteLive:
                     # Morning briefing — fires once per process launch (if enabled)
                     if not self._briefing_sent and get_brief_enabled():
                         self._briefing_sent = True
-                        tg.create_task(self._send_startup_briefing())
+                        tg.create_task(self._supervise("Briefing", self._send_startup_briefing()))
 
             except KeyboardInterrupt:
                 raise
@@ -2697,6 +3009,11 @@ class LiteLive:
 def _start_single_instance_listener(raise_callback):
     """Background thread: wakes up and invokes raise_callback() whenever a
     second launch attempt pings the lock socket held by this instance."""
+    if _single_instance_socket is None:
+        # Raise channel unavailable (an unrelated app holds the port). The
+        # Windows mutex still blocks duplicate launches — later clicks just
+        # can't raise this window.
+        return
     def _serve():
         while True:
             try:

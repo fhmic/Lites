@@ -17,12 +17,25 @@ _SAFE_ROOTS: list[Path] = [
 ]
 
 def _is_safe_path(target: Path) -> bool:
-    """Verilen path _SAFE_ROOTS içinde mi? Değilse işlemi reddet."""
+    """Is `target` inside _SAFE_ROOTS (or the configured Obsidian vault)?
+    Rejects the operation if not.
+
+    The vault is checked dynamically (not folded into _SAFE_ROOTS at
+    import time) because it very often lives OUTSIDE the home directory —
+    a synced cloud folder, a different drive, etc. — and the whole point
+    of routing file creation there (see file_controller()'s default-path
+    logic above) is defeated if it then gets rejected here. The user
+    configured it explicitly in settings, which is the same trust basis
+    as Desktop/Documents/home."""
     try:
         resolved = target.resolve()
+        roots = list(_SAFE_ROOTS)
+        vault = _get_obsidian_vault()
+        if vault:
+            roots.append(vault)
         return any(
             resolved == root.resolve() or resolved.is_relative_to(root.resolve())
-            for root in _SAFE_ROOTS
+            for root in roots
         )
     except Exception:
         return False
@@ -70,6 +83,18 @@ def _get_videos() -> Path:
     return Path.home() / "Videos"
 
 
+def _get_obsidian_vault() -> Path | None:
+    """Returns the configured Obsidian vault root, or None. Reuses
+    actions/obsidian.py's single source of truth for
+    config/api_keys.json's "obsidian_vault_path" rather than re-reading
+    the config file here."""
+    try:
+        from actions.obsidian import get_vault_path
+        return get_vault_path()
+    except Exception:
+        return None
+
+
 def _resolve_path(raw: str) -> Path:
     shortcuts: dict[str, Path] = {
         "desktop":   _get_desktop(),
@@ -81,6 +106,12 @@ def _resolve_path(raw: str) -> Path:
         "home":      Path.home(),
     }
     lower = raw.strip().lower()
+    if lower in ("obsidian", "vault", "obsidian vault"):
+        vault = _get_obsidian_vault()
+        if vault:
+            return vault
+        # Not configured — fall through to literal-path handling below
+        # rather than silently landing somewhere unexpected.
     if lower in shortcuts:
         return shortcuts[lower]
     return Path(raw).expanduser()
@@ -474,9 +505,28 @@ def file_controller(
     session_memory=None,
 ) -> str:
     params = parameters or {}
-    action = params.get("action", "").lower().strip()
-    path   = params.get("path", "desktop")
-    name   = params.get("name", "")
+    action   = params.get("action", "").lower().strip()
+    raw_path = params.get("path")   # None if the caller genuinely didn't specify one
+    name     = params.get("name", "")
+
+    # For actions that CREATE something new, an unspecified path used to
+    # silently fall back to "desktop" — which, combined with the calling
+    # model sometimes supplying its own guessed path instead (documents,
+    # an invented absolute path, etc.) is what made new files show up in
+    # an inconsistent folder each time. Now: if an Obsidian vault is
+    # configured (config/api_keys.json -> "obsidian_vault_path"), that's
+    # the default for anything created with no explicit path, so files
+    # land in one predictable place. Falls back to the old "desktop"
+    # default when no vault is configured. Actions that operate on
+    # something that already exists (list/delete/move/etc.) are
+    # unaffected — "desktop" remains their default, same as before.
+    _CREATE_ACTIONS = {"create_file", "write", "create_folder"}
+    if raw_path:
+        path = raw_path
+    elif action in _CREATE_ACTIONS and _get_obsidian_vault():
+        path = "obsidian"
+    else:
+        path = "desktop"
 
     if player:
         player.write_log(f"[file] {action} {name or path}")

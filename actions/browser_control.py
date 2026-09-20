@@ -757,14 +757,14 @@ class _BrowserSession:
             if link.get("href", "").startswith(("http://", "https://")) and (not terms or any(term in text for term in terms)):
                 if link["href"] not in [item["href"] for item in candidates]:
                     candidates.append(link)
-        excerpts = [f"SOURCE: {page.url}\n{(await page.inner_text('body'))[:3000]}"]
+        excerpts = [f"SOURCE: {page.url}\n{await page.inner_text('body')}"]
         for link in candidates[:limit - 1]:
             try:
                 await page.goto(link["href"], wait_until="domcontentloaded", timeout=15_000)
-                excerpts.append(f"SOURCE: {page.url}\n{(await page.inner_text('body'))[:3000]}")
+                excerpts.append(f"SOURCE: {page.url}\n{await page.inner_text('body')}")
             except Exception as e:
                 excerpts.append(f"SOURCE FAILED: {link['href']} ({e})")
-        return "\n\n---\n\n".join(excerpts)[:12_000]
+        return "\n\n---\n\n".join(excerpts)
 
     async def press(self, key: str) -> str:
         page = await self._get_page()
@@ -778,7 +778,7 @@ class _BrowserSession:
         page = await self._get_page()
         try:
             text = await page.inner_text("body")
-            return text[:4_000]
+            return text
         except Exception as e:
             return f"Could not get page text: {e}"
 

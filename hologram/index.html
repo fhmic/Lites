@@ -106,6 +106,15 @@
     border:1px solid var(--border); border-radius:3px;
     width:100%;
   }
+  /* SYSTEM LOG panel specifically — the conversation transcript ("You: .."/
+     "LITE: ..") needs to stay readable while it's actively updating during
+     speech, so it gets a much more opaque background than the other
+     sidebar panels (weather/preview/command-input keep the lighter .55
+     glass look). .panel.log-panel (two classes) beats the plain .panel
+     rule above on specificity regardless of source order. */
+  .panel.log-panel{
+    background:linear-gradient(180deg, var(--panel), rgba(1,13,20,.95));
+  }
   .panel .hdr{
     font-size:8px; letter-spacing:2px; color:var(--pri-dim);
     padding:7px 10px; border-bottom:1px solid var(--border);
@@ -233,6 +242,7 @@
     width:min(760px, 84vw); height:min(540px, 72vh);
     min-width:340px; min-height:180px;
     display:none; z-index:22; /* above the settings modal (20) so results are never hidden behind it */
+    background:rgba(2, 12, 18, .97);
     box-shadow:0 0 34px rgba(0,255,65,.10);
   }
   .content-panel.visible{ display:block; }
@@ -249,6 +259,7 @@
   .cp-btn{ cursor:pointer; color:var(--text-dim); padding:0 2px; font-size:11px; line-height:1; }
   .cp-btn:hover{ color:var(--pri); }
   .cp-btn.cp-close:hover{ color:var(--red); }
+  .cp-btn.cp-read.active{ color:var(--pri); }
   .cp-btn[disabled]{ opacity:.25; pointer-events:none; }
   .content-panel.minimized .cp-body,
   .content-panel.minimized .cp-resize{ display:none; }
@@ -709,7 +720,7 @@
     <div class="fc-row" id="wxForecast"></div>
   </div>
 
-  <div class="panel">
+  <div class="panel log-panel">
     <div class="hdr"><span class="dot"></span>SYSTEM LOG</div>
     <div class="log" id="logLines"></div>
   </div>
@@ -789,6 +800,7 @@
     <div class="hdr" id="contentHdr">
       <span class="cp-hdr-title" id="contentTitle">CONTENT</span>
       <div class="cp-controls">
+        <span class="cp-btn cp-read" id="contentRead" title="Read displayed content aloud" role="button" tabindex="0">READ</span>
         <span class="cp-btn" id="contentPrev" title="Previous">◀</span>
         <span class="cp-btn" id="contentNext" title="Next">▶</span>
         <span class="cp-btn" id="contentMin" title="Minimize">–</span>
@@ -1375,6 +1387,44 @@ document.getElementById('settingsBtn').addEventListener('click', ()=>{
   const btnMin  = document.getElementById('contentMin');
   const btnPrev = document.getElementById('contentPrev');
   const btnNext = document.getElementById('contentNext');
+  const btnRead = document.getElementById('contentRead');
+
+  let speechChunks = [];
+  let speechIndex = 0;
+
+  function stopReading(){
+    if('speechSynthesis' in window) window.speechSynthesis.cancel();
+    speechChunks = [];
+    speechIndex = 0;
+    btnRead.classList.remove('active');
+    btnRead.textContent = 'READ';
+  }
+
+  function readDisplayedContent(){
+    if(!('speechSynthesis' in window)) return;
+    if(window.speechSynthesis.speaking){ stopReading(); return; }
+    const text = (body.innerText || body.textContent || '').trim();
+    if(!text) return;
+    stopReading();
+    // Chromium caps long utterances inconsistently, so read in sentence-sized chunks.
+    speechChunks = text.match(/[\s\S]{1,180}(?:\s|$)/g) || [text];
+    speechIndex = 0;
+    btnRead.classList.add('active');
+    btnRead.textContent = 'STOP';
+    const speakNext = ()=>{
+      if(speechIndex >= speechChunks.length){ stopReading(); return; }
+      const utterance = new SpeechSynthesisUtterance(speechChunks[speechIndex++].trim());
+      utterance.onend = speakNext;
+      utterance.onerror = stopReading;
+      window.speechSynthesis.speak(utterance);
+    };
+    speakNext();
+  }
+
+  btnRead.addEventListener('click', readDisplayedContent);
+  btnRead.addEventListener('keydown', (e)=>{
+    if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); readDisplayedContent(); }
+  });
 
   // History — every onContent() call is pushed here so ◀ ▶ can flip back
   // through what earlier sub-agent calls displayed in this same session,
@@ -1412,6 +1462,7 @@ document.getElementById('settingsBtn').addEventListener('click', ()=>{
 
   // ---- close ----
   document.getElementById('contentClose').addEventListener('click', ()=>{
+    stopReading();
     panel.classList.remove('visible');
   });
 

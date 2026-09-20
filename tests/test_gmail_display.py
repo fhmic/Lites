@@ -15,7 +15,14 @@ class Display:
 class GmailDisplayTest(unittest.TestCase):
     @patch("core.google_workspace.list_recent_emails")
     def test_inbox_renders_when_sender_has_no_display_alias(self, list_emails):
+        # Shape mirrors core.google_workspace.list_recent_emails' contract:
+        # {id, thread_id, from, from_display, subject, date, snippet} — "id"
+        # is ALWAYS present (it comes straight from the Gmail API) and the
+        # inbox table needs it. "from_display" is deliberately omitted here:
+        # this test exercises the fallback to the raw address when the
+        # sender has no display alias.
         list_emails.return_value = [{
+            "id": "msg-001",
             "from": "sender@example.com",
             "subject": "A subject",
             "snippet": "A preview",

@@ -25,7 +25,7 @@ import threading
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, Qt, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, Qt, QTimer, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMainWindow
 
@@ -120,13 +120,32 @@ class _HologramHTTPServer:
             pass
 
 
-class _RootShim:
-    """Matches the old ui.py's `.root.mainloop()` contract used by main.py."""
+class _RootShim(QObject):
+    """Matches the old ui.py's `.root.mainloop()` contract used by main.py,
+    plus the Tk-style `.after(ms, func, *args)` that main.py's single-instance
+    raise-window path needs. The socket listener that receives a duplicate
+    launch's ping runs on a worker thread and must schedule onto the Qt main
+    thread — calling Qt widgets from that thread would crash, so `.after()`
+    hops over via a queued signal (auto-cross-thread) and a QTimer."""
+    _after_sig = pyqtSignal(int, object)
+
     def __init__(self, app: QApplication):
+        QObject.__init__(self)
         self._app = app
+        self._after_sig.connect(self._run_after)
 
     def mainloop(self):
         self._app.exec()
+
+    def after(self, ms: int, func, *args):
+        """Thread-safe: schedules func(*args) on the Qt main thread after
+        `ms` milliseconds (matching the Tk root.after() contract main.py
+        was written against)."""
+        self._after_sig.emit(int(ms), lambda: func(*args))
+
+    def _run_after(self, ms: int, fn):
+        # Runs on the GUI thread — QTimer.singleShot is safe from here.
+        QTimer.singleShot(ms, fn)
 
 
 class Bridge(QObject):
@@ -150,6 +169,7 @@ class Bridge(QObject):
     vaultBrowseRequest      = pyqtSignal()
     vaultPathSubmitted      = pyqtSignal(str)
     contentActionRequest    = pyqtSignal(str)  # JSON string — see _on_content_action
+    readContentRequest      = pyqtSignal(str)
     hudReady          = pyqtSignal()
 
     @pyqtSlot(str)
@@ -220,6 +240,10 @@ class Bridge(QObject):
         Python side needs to re-run the underlying action and refresh
         the panel — see HudWindow._on_content_action."""
         self.contentActionRequest.emit(action_json)
+
+    @pyqtSlot(str)
+    def requestReadContent(self, text: str):
+        self.readContentRequest.emit(text)
 
     @pyqtSlot()
     def notifyHudReady(self):
@@ -331,6 +355,7 @@ class HudWindow(QMainWindow):
         self._bridge.vaultBrowseRequest.connect(self._on_vault_browse)
         self._bridge.vaultPathSubmitted.connect(self._on_vault_path_submitted)
         self._bridge.contentActionRequest.connect(self._on_content_action)
+        self._bridge.readContentRequest.connect(self._on_read_content)
         self._bridge.hudReady.connect(self._on_hud_ready)
 
         self._zoom_level = 1.0
@@ -469,6 +494,16 @@ class HudWindow(QMainWindow):
                 self.on_text_command(text)
             except Exception as e:
                 self._log_sig.emit(f"ERR: text command failed: {e}")
+
+    def _on_read_content(self, text: str):
+        if self.on_text_command:
+            try:
+                self.on_text_command(
+                    "Read the following displayed content aloud in full, verbatim. "
+                    "Do not summarize or omit details:\n\n" + (text or "")
+                )
+            except Exception as e:
+                self._log_sig.emit(f"ERR: content read failed: {e}")
 
     def _on_interrupt_recv(self):
         if self.on_interrupt:
@@ -1042,7 +1077,7 @@ class LiteUI:
                 payload_json = json.dumps(payload)
             except Exception:
                 payload_json = ""
-        self._win._content_sig.emit(title[:64], kind, text[:8000], payload_json)
+        self._win._content_sig.emit(title[:64], kind, text, payload_json)
 
     def prompt_reconfig(self):
         """Thread-safe: show the setup modal again (e.g. after an auth error)."""

@@ -1,10 +1,10 @@
 {
   "totals": {
     "groq": {
-      "calls": 5,
-      "chars_in": 26188,
-      "chars_out": 20011,
-      "last": "2026-09-11T12:39:41.690647"
+      "calls": 29,
+      "chars_in": 113484,
+      "chars_out": 96360,
+      "last": "2026-09-20T18:17:28.352875"
     },
     "gemini": {
       "calls": 1,
@@ -28,9 +28,23 @@
     },
     "2026-09-11": {
       "groq": {
-        "calls": 1,
-        "chars_in": 3842,
-        "chars_out": 5882
+        "calls": 9,
+        "chars_in": 33074,
+        "chars_out": 28003
+      }
+    },
+    "2026-09-16": {
+      "groq": {
+        "calls": 6,
+        "chars_in": 31765,
+        "chars_out": 10392
+      }
+    },
+    "2026-09-20": {
+      "groq": {
+        "calls": 10,
+        "chars_in": 26299,
+        "chars_out": 43836
       }
     }
   }

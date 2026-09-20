@@ -58,6 +58,14 @@ def has_vault_configured() -> bool:
     return _vault_path() is not None
 
 
+def get_vault_path() -> Path | None:
+    """Public accessor for the configured vault root — used by
+    actions/file_controller.py so generic "create a file"/"write" requests
+    default to the vault instead of guessing a folder. Returns None if no
+    vault is configured (matches has_vault_configured())."""
+    return _vault_path()
+
+
 def _journal_dir() -> Path | None:
     vault = _vault_path()
     if not vault:

@@ -203,10 +203,13 @@ def _process_pdf(path: Path, action: str, params: dict, speak=None) -> str:
                 return ""
         return text[:max_chars]
 
-    if action in ("summarize", "extract_text", "translate_hint", "analyze", "reformat"):
+    if action in ("summarize", "read", "extract_text", "translate_hint", "analyze", "reformat"):
         text = _extract_pdf_text()
         if not text.strip():
             return "Could not extract text from PDF (may be scanned/image-based)."
+
+        if action == "read":
+            return text
 
         if action == "extract_text":
             out = _output_path(path, "text", ".txt")
@@ -286,7 +289,10 @@ def _process_text_doc(path: Path, file_type: str, action: str,
         lines = content.count("\n")
         return f"Word count: {words} words, {chars} characters, {lines} lines."
 
-    if action == "extract_text":
+    if action in ("read", "extract_text"):
+        if action == "read":
+            return content
+
         if file_type != "txt":
             out = _output_path(path, "extracted", ".txt")
             out.write_text(content, encoding="utf-8")
@@ -350,6 +356,9 @@ def _process_data(path: Path, file_type: str, action: str,
             return f"Statistics:\n{desc[:2000]}"
         except Exception as e:
             return f"Stats failed: {e}"
+
+    if action == "read":
+        return df.to_string(index=False)
 
     if action == "analyze":
         preview = df.head(50).to_string()
@@ -431,6 +440,9 @@ def _process_json(path: Path, action: str, params: dict, speak=None) -> str:
     if action == "validate":
         return f"Valid JSON. Type: {type(data).__name__}, size: {_file_size_str(path)}"
 
+    if action == "read":
+        return content
+
     if action == "format":
         out = _output_path(path, "formatted", ".json")
         out.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -466,6 +478,9 @@ def _process_code(path: Path, action: str, params: dict, speak=None) -> str:
     action  = action or "explain"
     content = path.read_text(encoding="utf-8", errors="ignore")
     ext     = path.suffix.lstrip(".")
+
+    if action == "read":
+        return content
 
     if action == "run":
         if ext == "py":
@@ -522,6 +537,9 @@ def _process_code(path: Path, action: str, params: dict, speak=None) -> str:
 
 def _process_audio(path: Path, action: str, params: dict, speak=None) -> str:
     action = action or "transcribe"
+
+    if action == "read":
+        action = "transcribe"
 
     if action == "info":
         try:
@@ -593,6 +611,9 @@ def _process_audio(path: Path, action: str, params: dict, speak=None) -> str:
 
 def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
     action = action or "info"
+
+    if action == "read":
+        action = "transcribe"
 
 
     def _ffmpeg_available() -> bool:
@@ -783,6 +804,9 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
 def _process_archive(path: Path, action: str, params: dict, speak=None) -> str:
     action = action or "list"
 
+    if action == "read":
+        action = "list"
+
     if action == "list":
         try:
             import zipfile, tarfile
@@ -830,8 +854,11 @@ def _process_pptx(path: Path, action: str, params: dict, speak=None) -> str:
         except ImportError:
             return "python-pptx not installed."
 
-    if action in ("summarize", "extract_text", "analyze"):
+    if action in ("summarize", "read", "extract_text", "analyze"):
         text = _read_pptx_text()
+        if action == "read":
+            return text
+
         if action == "extract_text":
             out = _output_path(path, "text", ".txt")
             out.write_text(text, encoding="utf-8")
@@ -869,9 +896,11 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
 
     if file_type == "unknown":
         try:
-            content = path.read_text(encoding="utf-8", errors="ignore")[:10000]
+            content = path.read_text(encoding="utf-8", errors="ignore")
+            if action == "read":
+                return content
             model   = _gemini_client()
-            prompt  = f"File: {path.name}\nContent preview:\n{content}\n\nTask: {action or instruction or 'Describe what this file contains and what can be done with it.'}"
+            prompt  = f"File: {path.name}\nContent:\n{content[:40000]}\n\nTask: {action or instruction or 'Describe what this file contains and what can be done with it.'}"
             response = model.generate_content(prompt)
             return response.text.strip()
         except Exception as e:

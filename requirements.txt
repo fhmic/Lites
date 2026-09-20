@@ -52,3 +52,9 @@ miniaudio
 # Optional — global mute hotkey (works even when LITE's window isn't
 # focused). Skip if you're fine with the in-app mute button / F4 only.
 pynput
+
+# Optional — acoustic echo cancellation: subtracts LITE's own voice from the
+# mic so you can interrupt it by speaking while it talks (true barge-in)
+# without it hearing its own echo. Skip it and LITE falls back to muting the
+# mic while speaking (button interrupt only).
+pyaec
