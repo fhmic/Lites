@@ -1,6 +1,11 @@
 import asyncio
+import os
 import types
 import unittest
+
+# Safe to run standalone while LITE itself is running (importing main runs
+# its single-instance guard, which would otherwise exit this process).
+os.environ.setdefault("LITE_ALLOW_MULTI_INSTANCE", "1")
 
 from main import LiteLive, TOOL_DECLARATIONS
 

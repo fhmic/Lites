@@ -1,25 +1,41 @@
 import os
+import socket
 import unittest
 
-os.environ.setdefault("LITE_ALLOW_MULTI_INSTANCE", "1")
+_BYPASS_SET = os.environ.setdefault("LITE_ALLOW_MULTI_INSTANCE", "1")
 
 import main
 
 
 class _MutexGuardTestBase(unittest.TestCase):
-    """Runs the real (env-bypassed) guard against a throwaway mutex name so
-    the tests are hermetic — they pass whether or not LITE itself is running
-    (a live LITE holds the real mutex and the real port 51477, neither of
-    which these tests touch)."""
+    """Runs the REAL guard logic (the env bypass is temporarily removed)
+    against a throwaway mutex name and an OS-assigned ephemeral raise-channel
+    port, so these tests are hermetic: they pass whether or not LITE itself
+    is running. A live LITE owns the real mutex and the real port 51477 —
+    neither is ever touched here."""
 
     def setUp(self):
+        self._orig_env = os.environ.get("LITE_ALLOW_MULTI_INSTANCE")
+        os.environ.pop("LITE_ALLOW_MULTI_INSTANCE", None)
         self._orig_mutex_name = main._SINGLE_INSTANCE_MUTEX_NAME
         main._SINGLE_INSTANCE_MUTEX_NAME = "Local\\LITE.SingleInstance.TestMutex"
+        self._orig_port = main._SINGLE_INSTANCE_PORT
+        # Pick a genuinely free port for the raise channel so a live LITE
+        # (which owns the real 51477) can't interfere with these tests.
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        main._SINGLE_INSTANCE_PORT = probe.getsockname()[1]
+        probe.close()
         main._release_single_instance_lock()
 
     def tearDown(self):
         main._release_single_instance_lock()
+        main._SINGLE_INSTANCE_PORT = self._orig_port
         main._SINGLE_INSTANCE_MUTEX_NAME = self._orig_mutex_name
+        if self._orig_env is None:
+            os.environ.pop("LITE_ALLOW_MULTI_INSTANCE", None)
+        else:
+            os.environ["LITE_ALLOW_MULTI_INSTANCE"] = self._orig_env
 
 
 class WindowsMutexGuardTest(_MutexGuardTestBase):
@@ -51,15 +67,13 @@ class SocketRaiseChannelTest(_MutexGuardTestBase):
     def test_start_succeeds_even_if_lock_port_is_busy(self):
         # The mutex is authoritative on Windows: if the raise-channel port is
         # held by another process, LITE must still start (without the channel)
-        # instead of refusing to launch. Simulate by occupying the port first.
+        # instead of refusing to launch. Simulate by occupying the (ephemeral)
+        # port first.
         import socket
         occupier = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.addCleanup(occupier.close)
-        try:
-            occupier.bind(("127.0.0.1", main._SINGLE_INSTANCE_PORT))
-            occupier.listen(1)
-        except OSError:
-            self.skipTest("port 51477 unexpectedly busy at OS level")
+        occupier.bind(("127.0.0.1", main._SINGLE_INSTANCE_PORT))
+        occupier.listen(1)
         self.assertTrue(main._acquire_single_instance_lock())
         self.assertIsNone(main._single_instance_socket)
 
@@ -77,13 +91,17 @@ class SocketRaiseChannelTest(_MutexGuardTestBase):
 
 class EscapeHatchTest(unittest.TestCase):
     def test_env_var_bypasses_guard(self):
+        old = os.environ.get("LITE_ALLOW_MULTI_INSTANCE")
         os.environ["LITE_ALLOW_MULTI_INSTANCE"] = "1"
         try:
             # Even with the real mutex possibly held by a live LITE, the
             # escape hatch must unconditionally allow acquisition.
             self.assertTrue(main._acquire_single_instance_lock())
         finally:
-            os.environ.pop("LITE_ALLOW_MULTI_INSTANCE", None)
+            if old is None:
+                os.environ.pop("LITE_ALLOW_MULTI_INSTANCE", None)
+            else:
+                os.environ["LITE_ALLOW_MULTI_INSTANCE"] = old
             main._release_single_instance_lock()
 
 

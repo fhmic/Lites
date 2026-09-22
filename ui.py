@@ -1057,6 +1057,30 @@ class LiteUI:
     def set_state(self, state: str):
         self._safe_emit_pyqt_signal("_state_sig", state)
 
+    def raise_to_front(self):
+        """Bring the HUD window to the foreground. Used when a duplicate
+        launch pings this running instance via the single-instance raise
+        channel (main.py's _raise_lite_window). The Qt equivalent of the old
+        Tkinter root.deiconify/lift/focus_force combo. Must run on the Qt
+        main thread — _RootShim.after already guarantees that."""
+        win = self._win
+        win.showNormal()          # restore if minimized
+        win.raise_()              # top of the stacking order
+        win.activateWindow()      # keyboard focus
+        # Windows refuses to give focus to a background app's window without
+        # a nudge — a brief always-on-top flash does the trick. The flag is
+        # dropped a moment later so LITE doesn't stay pinned above everything.
+        win.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        win.show()
+
+        def _drop_topmost():
+            try:
+                win.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+                win.show()
+            except RuntimeError:
+                pass  # window already destroyed (app shutting down)
+        QTimer.singleShot(400, _drop_topmost)
+
     def write_log(self, text: str):
         self._safe_emit_pyqt_signal("_log_sig", text)
 

@@ -1,16 +1,16 @@
 {
   "totals": {
     "groq": {
-      "calls": 29,
-      "chars_in": 113484,
-      "chars_out": 96360,
-      "last": "2026-09-20T18:17:28.352875"
+      "calls": 41,
+      "chars_in": 131962,
+      "chars_out": 132854,
+      "last": "2026-09-22T11:17:23.870769"
     },
     "gemini": {
-      "calls": 1,
-      "chars_in": 451,
-      "chars_out": 131,
-      "last": "2026-09-10T10:06:32.265627"
+      "calls": 2,
+      "chars_in": 1775,
+      "chars_out": 291,
+      "last": "2026-09-20T18:49:58.117548"
     }
   },
   "daily": {
@@ -42,9 +42,21 @@
     },
     "2026-09-20": {
       "groq": {
-        "calls": 10,
-        "chars_in": 26299,
-        "chars_out": 43836
+        "calls": 16,
+        "chars_in": 37981,
+        "chars_out": 76582
+      },
+      "gemini": {
+        "calls": 1,
+        "chars_in": 1324,
+        "chars_out": 160
+      }
+    },
+    "2026-09-22": {
+      "groq": {
+        "calls": 6,
+        "chars_in": 6796,
+        "chars_out": 3748
       }
     }
   }

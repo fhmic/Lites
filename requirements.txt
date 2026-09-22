@@ -53,8 +53,9 @@ miniaudio
 # focused). Skip if you're fine with the in-app mute button / F4 only.
 pynput
 
-# Optional — acoustic echo cancellation: subtracts LITE's own voice from the
-# mic so you can interrupt it by speaking while it talks (true barge-in)
-# without it hearing its own echo. Skip it and LITE falls back to muting the
-# mic while speaking (button interrupt only).
+# Optional — acoustic echo cancellation so you can interrupt LITE by voice
+# while it's speaking (true barge-in) without it hearing its own echo.
+# OFF by default ("echo_cancellation": false); only enable it where the
+# canceller provably beats the speaker leak. Without it LITE pauses the mic
+# while speaking (button interrupt only).
 pyaec

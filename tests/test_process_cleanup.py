@@ -2,6 +2,11 @@ import os
 import unittest
 from unittest.mock import patch
 
+# Safe to run standalone while LITE itself is running (agent imports could
+# transitively pull in main.py, whose single-instance guard would exit this
+# process on import).
+os.environ.setdefault("LITE_ALLOW_MULTI_INSTANCE", "1")
+
 from actions import computer_settings
 from actions.code_agent import _command_template, _minimal_command_template
 

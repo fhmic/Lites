@@ -102,8 +102,33 @@ def _get_credentials():
 
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
+                try:
+                    creds.refresh(Request())
+                except Exception:
+                    # The refresh token is dead — Google rejected it with
+                    # invalid_grant. Most common cause: the OAuth consent
+                    # screen is in "Testing" mode, which expires refresh
+                    # tokens after 7 days (see config/google_oauth_setup.md).
+                    # Other causes: access revoked at
+                    # myaccount.google.com/permissions, or the client secret
+                    # JSON was replaced after the token was issued.
+                    # Either way, keeping the stale token file would make
+                    # EVERY future call retry the same doomed refresh
+                    # forever — delete it and fall through to a fresh
+                    # interactive consent so we self-heal instead.
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Google refresh token rejected (likely expired after 7 "
+                        "days in consent-screen Testing mode, or access was "
+                        "revoked) — deleting stale token and re-running the "
+                        "one-time browser consent."
+                    )
+                    try:
+                        TOKEN_PATH.unlink()
+                    except FileNotFoundError:
+                        pass
+                    creds = None
+            if not creds:
                 flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), SCOPES)
                 # port=0 lets the OS assign a free port each time, avoiding any
                 # fixed-port collision — Google's loopback redirect matching

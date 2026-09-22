@@ -4,18 +4,24 @@ Why this exists: LITE talks through the speakers and the laptop microphone
 hears its own voice back. Without cancellation, Gemini's voice-activity
 detector mistakes that echo for the user starting a new turn — LITE cuts
 itself off mid-sentence and the session flip-flops between LISTENING and
-SPEAKING. The simple fix (before this module existed) was to mute mic
-capture while LITE speaks — which also killed voice barge-in (interrupting
-LITE by talking over it).
+SPEAKING. The default behaviour (before this module is opted in) is to mute
+mic capture while LITE speaks — which also removes voice barge-in
+(interrupting LITE by talking over it).
 
-This module restores true barge-in: it knows exactly what LITE is playing
-(the "far-end"/reference signal — see LiteLive._play_audio) and subtracts
-the echo path from the mic capture ("near-end") in real time, so the mic
-can stay open while LITE speaks and Gemini only ever hears the real user.
-Uses the Speex acoustic echo canceller via the `pyaec` wheel (a small Rust
-binding with prebuilt Windows/macOS/Linux binaries — no compiler needed).
-If the wheel is missing or fails, callers transparently fall back to the
-mute-while-speaking behaviour, so this module is strictly optional.
+This module implements the alternative: it knows exactly what LITE is
+playing (the "far-end"/reference signal — see LiteLive._play_audio) and
+subtracts the echo path from the mic capture ("near-end") in real time, so
+the mic can stay open while LITE speaks and Gemini only ever hears the
+real user. Uses the Speex acoustic echo canceller via the `pyaec` wheel (a
+small Rust binding with prebuilt Windows/macOS/Linux binaries — no
+compiler needed).
+
+OPT-IN BY DEFAULT (config "echo_cancellation"): real rooms vary — speaker
+volume, mic array placement and reverb decide whether the canceller beats
+the speaker leak, and on hardware where it doesn't, the leaked echo is
+worse than the bug it fixes (LITE hears itself). If the wheel is missing
+or fails, callers transparently fall back to the mute-while-speaking
+behaviour, so this module is strictly optional either way.
 """
 
 import threading

@@ -11,8 +11,13 @@ These tests are written so the failure mode is loud: if either file's rule
 regresses to a "switch automatically" stance, the corresponding assertion
 fails immediately, surfacing the contradiction before it ships.
 """
+import os
 import re
 import unittest
+
+# Safe to run standalone while LITE itself is running (these tests import
+# main.py lazily, which runs its single-instance guard on import).
+os.environ.setdefault("LITE_ALLOW_MULTI_INSTANCE", "1")
 
 
 PROMPT_PATH = "core/prompt.txt"

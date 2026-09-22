@@ -40,6 +40,6 @@
   "_comment_hotkey": "System-wide mute toggle (works even when LITE's window isn't focused). pynput format — see https://pynput.readthedocs.io/en/latest/keyboard.html#global-hotkeys",
   "mute_hotkey": "<ctrl>+<alt>+m",
 
-  "_comment_echo": "While LITE talks out loud, echo cancellation subtracts its own voice from the microphone (using the optional 'pyaec' package), so you can interrupt it simply by speaking — and it won't mistake its own echo for you. Set false to fall back to muting the mic while LITE speaks (then use the stop button to interrupt). Default true.",
-  "echo_cancellation": true
+  "_comment_echo": "echo_cancellation is OFF by default: LITE pauses the microphone while it speaks, and you interrupt it with the stop button or the global mute hotkey. Set true only if you want to experiment with interrupting LITE by voice while it talks — that requires the optional 'pyaec' package and well-behaved speakers/mic; on hardware where cancellation can't keep up with the speaker leak, LITE will hear itself.",
+  "echo_cancellation": false
 }

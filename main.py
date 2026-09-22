@@ -297,14 +297,15 @@ RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 2048
 INPUT_AUDIO_MIME    = "audio/pcm;rate=16000"
 # Speaker echo guard: after LITE stops speaking, keep ignoring mic input for
-# this long. Laptop speakers leak LITE's own voice back into the microphone,
-# and Gemini's server-side VAD then hears "the user" mid-sentence, interrupts
-# LITE's speech and flips the session LISTENING↔SPEAKING until the turn falls
-# apart (the "keeps breaking and switching intermittently" bug). Short enough
-# that real replies feel immediate; long enough to absorb tail echo/reverb.
-# Barge-in is unaffected — the stop button / global hotkey / remote all go
-# through interrupt(), which reopens the mic instantly.
-ECHO_GUARD_S        = 0.35
+# this long. Two delays stack after the last chunk is *handed to* the sound
+# system: the output buffer itself still has to drain (latency="high" keeps
+# a few hundred ms queued) and the room then needs time to decay — so the
+# tail must be anchored well past the moment playback "ends" on the software
+# side. The old 0.35 s tail let LITE's final words leak back into the mic,
+# Gemini's VAD heard them as "the user", and LITE started responding to its
+# own voice. Barge-in is unaffected — the stop button / global hotkey /
+# remote all go through interrupt(), which reopens the mic instantly.
+ECHO_GUARD_S        = 1.0
 
 def _get_api_key() -> str:
     """
@@ -321,13 +322,17 @@ def _get_api_key() -> str:
 
 def _echo_cancellation_enabled() -> bool:
     """Whether the mic should stay open while LITE speaks using real echo
-    cancellation (voice barge-in). Default true; set "echo_cancellation":
-    false in api_keys.json to fall back to muting the mic while speaking."""
+    cancellation (voice barge-in). OFF by default: how badly LITE's own voice
+    leaks into the mic depends entirely on the room, speaker volume and the
+    mic array — and on hardware where the canceller under-performs the leak,
+    the leaked echo is worse than the bug it fixes (LITE hears itself and
+    keeps interrupting). Set "echo_cancellation": true in api_keys.json to
+    opt in."""
     try:
         with open(API_CONFIG_PATH, "r", encoding="utf-8-sig") as f:
-            return bool(json.load(f).get("echo_cancellation", True))
+            return bool(json.load(f).get("echo_cancellation", False))
     except Exception:
-        return True
+        return False
 
 
 def _load_system_prompt() -> str:
@@ -1426,30 +1431,41 @@ class LiteLive:
         elif not self.ui.muted:
             self.ui.set_state("LISTENING")
 
+    def _echo_tail_passed(self) -> bool:
+        """True once the echo-guard tail window after LITE's last spoken word
+        has elapsed (and False while LITE is speaking). Shared by the PC mic
+        gate and the phone relay — both feed audio into the same Live
+        session, so both must stay quiet through the tail."""
+        with self._speaking_lock:
+            speaking = self._is_speaking
+            ended_at = self._speech_ended_at
+        if speaking:
+            # Opt-in echo cancellation (config "echo_cancellation": true)
+            # keeps capture open during playback — the canceller subtracts
+            # LITE's own voice, which is what enables voice barge-in.
+            return getattr(self, "_aec", None) is not None
+        return (time.monotonic() - ended_at) >= ECHO_GUARD_S
+
     def _mic_capture_allowed(self) -> bool:
         """True when mic frames should stream to Gemini right now.
 
         Two modes:
-        - Echo cancellation active (self._aec): the mic stays OPEN even while
-          LITE speaks — the canceller subtracts LITE's own voice from the
-          capture, so Gemini's VAD only ever sees the real user. This is
-          what enables true voice barge-in (interrupting LITE by talking).
-        - No echo cancellation: capture is gated while LITE speaks (plus a
-          short tail window — ECHO_GUARD_S). Without it, speaker echo
-          re-enters the mic, Gemini's VAD hears "the user" mid-sentence and
-          LITE interrupts itself — the flip-flopping "broken conversation"
-          bug. Barge-in then happens through the stop button, the global
-          mute hotkey, and the remote dashboard, which all call interrupt()
-          → set_speaking(False) and reopen the mic instantly.
+        - DEFAULT (no echo canceller): capture is gated while LITE speaks
+          (plus a short tail window — ECHO_GUARD_S). Without it, speaker
+          echo re-enters the mic, Gemini's VAD hears "the user" mid-sentence
+          and LITE interrupts itself — the flip-flopping "broken
+          conversation" bug. Barge-in happens through the stop button, the
+          global mute hotkey, and the remote dashboard, which all call
+          interrupt() → set_speaking(False) and reopen the mic instantly.
+        - Echo cancellation active (self._aec, opt-in via "echo_cancellation":
+          true): the mic stays OPEN even while LITE speaks — the canceller
+          subtracts LITE's own voice from the capture, so Gemini's VAD only
+          ever sees the real user (true voice barge-in). Only enable this
+          where the canceller provably beats the speaker leak.
         """
         if self.ui.muted or self._phone_active:
             return False
-        with self._speaking_lock:
-            speaking   = self._is_speaking
-            ended_at   = self._speech_ended_at
-        if speaking:
-            return getattr(self, "_aec", None) is not None
-        return (time.monotonic() - ended_at) >= ECHO_GUARD_S
+        return self._echo_tail_passed()
 
     def interrupt(self) -> None:
         """Stop LITE mid-speech: drain queued audio and open mic immediately."""
@@ -1883,11 +1899,10 @@ class LiteLive:
         print("[LITE] 🎤 Mic started")
         loop = asyncio.get_event_loop()
 
-        # Echo cancellation (voice barge-in) — created once per process,
-        # before the mic stream opens. Config-gated via "echo_cancellation"
-        # in api_keys.json (default true). Missing/failing pyaec just means
-        # the echo guard keeps the mic shut while LITE speaks (button
-        # interrupt only) — nothing else changes.
+        # Echo cancellation (voice barge-in) — OPT-IN, off by default: with
+        # echo cancellation active the mic stays open while LITE speaks, so
+        # cancellation quality directly decides whether LITE hears itself.
+        # Created once per process, before the mic stream opens.
         if self._aec is None and not self._aec_notice_sent:
             self._aec_notice_sent = True
             if _echo_cancellation_enabled():
@@ -1909,7 +1924,7 @@ class LiteLive:
                     )
             else:
                 self.ui.write_log(
-                    "SYS: Echo cancellation disabled in settings — use the stop button to interrupt."
+                    "SYS: Mic pauses while I speak — use the stop button or Ctrl+Alt+M to interrupt."
                 )
 
         def enqueue_mic_audio(data):
@@ -2151,8 +2166,14 @@ class LiteLive:
                         and self._turn_done_event.is_set()
                         and self.audio_in_queue.empty()
                     ):
-                        self.set_speaking(False)
-                        self._turn_done_event.clear()
+                        # Give late-arriving audio chunks a beat to land
+                        # before declaring the turn over — reopening the mic
+                        # between stragglers is exactly how LITE ends up
+                        # hearing its own tail.
+                        await asyncio.sleep(0.25)
+                        if self.audio_in_queue.empty():
+                            self.set_speaking(False)
+                            self._turn_done_event.clear()
                     continue
 
                 self.set_speaking(True)
@@ -2664,9 +2685,10 @@ class LiteLive:
 
             if self.session:
                 # Gemini Live is up — unchanged behaviour, straight passthrough.
-                with self._speaking_lock:
-                    speaking = self._is_speaking
-                if not speaking and not self.ui.muted:
+                # The echo tail applies here too: the phone's mic sits in the
+                # same room as LITE's speakers, so phone audio must also stay
+                # quiet until LITE's own voice has fully decayed.
+                if not self.ui.muted and self._echo_tail_passed():
                     try:
                         self.out_queue.put_nowait(item)
                     except asyncio.QueueFull:
@@ -3033,16 +3055,14 @@ def _start_single_instance_listener(raise_callback):
 
 
 def _raise_lite_window(ui):
-    """Bring LITE's window to the foreground. Runs on the Tk main thread
-    (scheduled via ui.root.after) since Tkinter isn't thread-safe."""
+    """Bring LITE's window to the foreground when a duplicate launch pings
+    us. Runs on the Qt main thread — the listener schedules it via
+    ui.root.after (see _RootShim.after), and the actual window work lives in
+    LiteUI.raise_to_front()."""
     try:
-        ui.root.deiconify()
-        ui.root.lift()
-        ui.root.attributes("-topmost", True)
-        ui.root.after(200, lambda: ui.root.attributes("-topmost", False))
-        ui.root.focus_force()
+        ui.raise_to_front()
     except Exception:
-        pass
+        pass  # never let a raise hiccup take the listener thread down
 
 
 def main():
