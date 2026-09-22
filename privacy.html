@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LITE — Privacy Policy</title>
+  <style>
+    body {
+      font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+      max-width: 720px;
+      margin: 8vh auto;
+      padding: 0 24px;
+      color: #1a1a2e;
+      line-height: 1.65;
+    }
+    h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+    h2 { font-size: 1.15rem; margin-top: 2rem; }
+    .updated { color: #555; font-size: 0.95rem; }
+    a { color: #0b57d0; }
+    ul { margin-top: 0.4rem; }
+    li { margin-bottom: 0.4rem; }
+  </style>
+</head>
+<body>
+  <h1>LITE — Privacy Policy</h1>
+  <p class="updated">Effective date: September 22, 2026</p>
+
+  <p>
+    LITE is a personal automation agent application that runs on its owner's own
+    computer. This policy explains what data LITE accesses, how that data is
+    used, who it is shared with, how it is stored, and how it can be deleted.
+  </p>
+
+  <h2>1. Who we are</h2>
+  <p>
+    LITE is developed and operated as a single-user personal application by its
+    owner, Felix H. Michael. It is not a public-facing service, has no other
+    users, and does not collect data from anyone other than its owner.
+    Contact: <a href="mailto:felixh.michael@gmail.com">felixh.michael@gmail.com</a>.
+  </p>
+
+  <h2>2. Google user data LITE accesses</h2>
+  <p>LITE requests only the following Google OAuth scopes:</p>
+  <ul>
+    <li>
+      <strong>gmail.readonly</strong> — read access to the owner's Gmail account,
+      used to list recent inbox messages and display their content (sender,
+      subject, date, and body) on screen when the owner asks what an email says.
+    </li>
+    <li>
+      <strong>gmail.compose</strong> — the ability to create
+      <strong>draft</strong> replies in the owner's Gmail Drafts folder. This
+      scope cannot send email. LITE deliberately contains no code that sends
+      email; every reply it writes must be reviewed and sent by the owner
+      manually.
+    </li>
+    <li>
+      <strong>calendar</strong> — read and write access to the owner's Google
+      Calendar, used to list upcoming events and create events the owner asks
+      for. Attendees are never added to an event without the owner's explicit
+      prior confirmation in conversation.
+    </li>
+  </ul>
+
+  <h2>3. How the data is used</h2>
+  <ul>
+    <li>Email content is retrieved only when the owner asks to check the inbox, read a specific email, or draft a reply, or when a scheduled inbox scan runs to summarize what is unread.</li>
+    <li>Email and calendar data are used solely to perform the task the owner requested — displaying inbox contents, drafting a reply, or creating a calendar event.</li>
+    <li>LITE does not use Google user data for advertising, profiling, analytics, model training, or any purpose other than the owner-requested tasks above.</li>
+    <li>LITE is a personal-use application and does not transfer Google user data to any third party for any purpose, including advertising or machine learning.</li>
+  </ul>
+
+  <h2>4. Third-party processing of user content</h2>
+  <p>
+    When the owner asks LITE to summarize, reply to, or act on an email or
+    document, the relevant text is sent to a large language model API to
+    generate the response. Depending on the configured provider, that may be
+    Google Gemini (Google Cloud), Anthropic (Claude), or Groq. These providers
+    process the text solely to generate LITE's response; LITE does not send
+    them Google account credentials, tokens, or contact lists — only the
+    message text needed for the task. Their handling of API-submitted content
+    is governed by their own terms. No LLM provider is given the ability to
+    read or send the owner's email; they only ever see text LITE explicitly
+    passes to them for a requested task.
+  </p>
+
+  <h2>5. Storage and retention</h2>
+  <ul>
+    <li>Google OAuth credentials (the access/refresh token) are stored only locally on the owner's computer, in a local configuration file, and never transmitted anywhere except directly to Google's OAuth servers.</li>
+    <li>Email bodies, calendar data, and drafted replies are not permanently stored by LITE. Content is fetched from Google at request time, displayed, and discarded. The app keeps only small local logs of its own actions (e.g., that an inbox scan ran), not of email content.</li>
+    <li>Documents and presentations LITE generates are saved as local files on the owner's computer.</li>
+  </ul>
+
+  <h2>6. Data sharing</h2>
+  <p>
+    LITE does not sell, rent, or share Google user data with any third party.
+    The only external transmission of user content is the LLM API request
+    described in section 4, and it is limited to the text needed for the task
+    the owner explicitly requested.
+  </p>
+
+  <h2>7. Data deletion</h2>
+  <ul>
+    <li>Deleting the local token file immediately revokes LITE's stored access; LITE will stop working with Google services until re-authorized.</li>
+    <li>Access can be revoked at any time from the owner's Google Account at myaccount.google.com/permissions, which immediately invalidates LITE's access to Gmail and Calendar.</li>
+    <li>Any drafts LITE created remain in the owner's own Gmail Drafts folder, under the owner's control.</li>
+  </ul>
+
+  <h2>8. Security</h2>
+  <p>
+    LITE runs entirely on the owner's own machine. OAuth tokens are stored in
+    a local, non-public configuration location and are never logged, embedded
+    in source code, or committed to version control. Communication with Google
+    and LLM providers happens over encrypted HTTPS connections.
+  </p>
+
+  <h2>9. Changes to this policy</h2>
+  <p>
+    If LITE's data handling changes, this policy will be updated here with a new
+    effective date before the change takes effect.
+  </p>
+
+  <p><a href="index.html">← Back to LITE home</a></p>
+
+  <div class="contact">
+    <p><strong>Contact:</strong> <a href="mailto:felixh.michael@gmail.com">felixh.michael@gmail.com</a></p>
+  </div>
+</body>
+</html>
