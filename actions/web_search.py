@@ -201,9 +201,89 @@ def _ddg_news(query: str, max_results: int = 8) -> list[dict]:
             return []
 
 
+def _google_news_rss(query: str, max_results: int = 8) -> list[dict]:
+    """
+    Google News RSS — a second keyless engine. DDG rate-limits aggressively
+    and has noticeably weaker coverage of Nigerian business/finance news, so
+    this runs as the automatic fallback whenever DDG comes back empty or
+    errors. Uses only the stdlib (urllib + xml.etree) — no new dependency,
+    no API key, and Google's news index is far richer for local stories.
+    """
+    import io
+    import urllib.parse
+    import urllib.request
+    import xml.etree.ElementTree as ET
+
+    url = (
+        "https://news.google.com/rss/search?q="
+        + urllib.parse.quote(query)
+        + "&hl=en-NG&gl=NG&ceid=NG:en"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (LITE assistant)"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        raw = resp.read()
+
+    items: list[dict] = []
+    try:
+        root = ET.parse(io.BytesIO(raw)).getroot()
+        for item in root.iter("item"):
+            title = (item.findtext("title") or "").strip()
+            link  = (item.findtext("link")  or "").strip()
+            desc  = (item.findtext("description") or "").strip()
+            src_node = item.find("source")
+            source = (src_node.text or "").strip() if src_node is not None else ""
+            if title:
+                items.append({
+                    "title":   title,
+                    "snippet": desc,
+                    "url":     link,
+                    "source":  source or "Google News",
+                })
+            if len(items) >= max_results:
+                break
+    except Exception as e:
+        raise RuntimeError(f"Google News RSS parse failed: {e}") from e
+    return items
+
+
+def _unified_web_results(query: str, max_results: int = 6) -> tuple[list[dict], str]:
+    """
+    DDG first; if it returns nothing OR errors, automatically try Google News
+    RSS before giving up. Returns (results, status) where status is one of:
+      "ok"        — at least one engine returned results
+      "empty"     — engines responded cleanly but genuinely found nothing
+      "failed"    — every engine raised (rate-limits, network, etc.)
+    The status matters: "empty" is weak evidence about the world, while
+    "failed" says nothing at all about the world — callers must not let an
+    LLM turn either into "this topic doesn't exist".
+    """
+    saw_error = False
+
+    try:
+        results = _ddg_search(query, max_results=max_results)
+        if results:
+            return results, "ok"
+    except Exception as e:
+        print(f"[WebSearch] ⚠️ DDG text failed ({e}) — trying Google News RSS...")
+        saw_error = True
+
+    try:
+        results = _google_news_rss(query, max_results=max_results)
+        if results:
+            return results, "ok"
+    except Exception as e:
+        print(f"[WebSearch] ⚠️ Google News RSS failed ({e})")
+        saw_error = True
+
+    return [], ("empty" if not saw_error else "failed")
+
+
 def _format_ddg(query: str, results: list[dict]) -> str:
     if not results:
-        return f"No results found for: {query}"
+        return (f"No results found for: {query}\n"
+                "(Inconclusive — engines may be rate-limited or the topic may "
+                "be sparsely covered. This is NOT evidence that the subject "
+                "doesn't exist publicly.)")
 
     lines = [f"Search results for: {query}\n"]
     for i, r in enumerate(results, 1):
@@ -244,8 +324,14 @@ def _synthesize_from_results(query: str, results_text: str, kind: str = "search"
     try:
         from core.ai_client import generate_content
         prompt = (
-            f"Based on these {kind} results, give a concise, well-organized answer "
-            f"to: {query}\n\n{results_text}"
+            f"Based ONLY on the following {kind} results, answer: {query}\n\n"
+            "Rules: cite what the results actually say; if the results do not "
+            "contain the answer, say exactly that ('the search results did not "
+            "cover this') and summarise what WAS found. NEVER claim a topic "
+            "has 'no publicly available information' just because these "
+            "results are thin — the search may simply have failed or been "
+            "rate-limited. Be concise and well-organized.\n\n"
+            f"{results_text}"
         )
         return generate_content(prompt).text
     except Exception as e:
@@ -257,10 +343,15 @@ def _synthesize_from_results(query: str, results_text: str, kind: str = "search"
 
 def _search(query: str) -> str:
     """
-    DuckDuckGo is the always-available baseline (no key needed). Gemini
-    (grounded search) is tried first if configured; if that fails, Claude
-    or a custom/local endpoint is tried next via the shared AI-client
-    fallback chain, before finally returning raw DDG results.
+    DuckDuckGo is the always-available baseline (no key needed), with Google
+    News RSS as a keyless second engine whenever DDG comes up empty or
+    errors. Gemini (grounded search) is tried first if configured; if that
+    fails, Claude or a custom/local endpoint is tried next via the shared
+    AI-client fallback chain, before finally returning raw results.
+
+    Crucially, this distinguishes "the engines failed" from "the engines
+    found nothing" so a transient rate-limit can never be reported to the
+    user as 'no information exists on this topic'.
     """
     provider = _get_search_provider()
     if provider == "gemini" and _get_api_key():
@@ -269,7 +360,28 @@ def _search(query: str) -> str:
         except Exception as e:
             print(f"[WebSearch] ⚠️ Gemini failed ({e}) — trying fallback...")
 
-    results      = _ddg_search(query)
+    results, status = _unified_web_results(query)
+
+    # Engines errored outright — say so plainly instead of implying the
+    # topic has no information available.
+    if not results and status == "failed":
+        return (
+            f"Search backends are currently unreachable (rate-limited or "
+            f"network error) so I could NOT verify: {query}. This is a "
+            f"temporary infrastructure failure, not evidence that no "
+            f"information exists. Please try again shortly, or ask me to "
+            f"open a specific source in the browser (e.g. nairametrics.com, "
+            f"proshare.co, reuters.com) for a deep dive."
+        )
+
+    # Engines responded cleanly but found nothing — retry once with a
+    # broadened variant before concluding anything.
+    if not results and status == "empty":
+        broadened = f"{query} Nigeria 2026"
+        if broadened.strip() != query.strip():
+            print(f"[WebSearch] 🔍 empty result — retrying broadened: {broadened!r}")
+            results, status = _unified_web_results(broadened)
+
     results_text = _format_ddg(query, results)
 
     if provider != "skip":
@@ -277,6 +389,12 @@ def _search(query: str) -> str:
         if synthesized:
             return synthesized
 
+    if not results:
+        return (
+            f"No results found for: {query} (searched DDG and Google News). "
+            f"Treat this as inconclusive — not as proof the topic doesn't "
+            f"exist. Try rephrasing, or ask for a browser deep dive."
+        )
     return results_text
 
 
@@ -301,10 +419,18 @@ def _news(query: str) -> str:
     def _try_ddg():
         try:
             results = _ddg_news(ddg_query, max_results=8)
-            text    = _format_news(ddg_query, results)
+            if not results:
+                # DDG news index can be thin/rate-limited — Google News RSS
+                # has far better Nigerian coverage and needs no key.
+                results = _google_news_rss(ddg_query, max_results=8)
+            text = _format_news(ddg_query, results)
         except Exception as e:
             print(f"[WebSearch] ⚠️ DDG news failed ({e})")
-            text = ""
+            try:
+                text = _format_news(ddg_query, _google_news_rss(ddg_query, max_results=8))
+            except Exception as e2:
+                print(f"[WebSearch] ⚠️ Google News RSS fallback also failed ({e2})")
+                text = ""
         with lock:
             ddg_box[0] = text
         done_evt.set()
